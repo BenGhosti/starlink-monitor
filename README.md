@@ -64,8 +64,9 @@ StarlinkMonitor/
 ├── docker-compose.yml  # Multi-container orchestration
 └── README.md           # Project documentation
 
----
 
-## 🔒 License & Safety
 
-* **Data Isolation:** All database entries (`data/`), `.env` configurations, and legacy backup `.zip` files are strictly excluded from git tracking to prevent accidental data leaks.
+🔒 License & Safety
+
+Data Isolation:
+All database entries (data/), .env configurations, and legacy backup .zip files are strictly excluded from git tracking to prevent accidental data leaks.
