@@ -52,8 +52,9 @@ The dashboard will now be accessible via your configured port (e.g., `http://loc
 
 ---
 
-## 📂 Project Structure
+## 📁 Project Structure
 
+```text
 StarlinkMonitor/
 ├── collector/          # Python background worker (gRPC polling)
 ├── frontend/           # Web server and dashboard UI (index.html, JS, CSS)
