@@ -379,6 +379,16 @@ async def delete_table(
 # Login / Logout
 # ---------------------------------------------------------------------------
 
+@app.get("/api/config")
+async def public_config():
+    """Oeffentlich (kein Auth) - liefert reine UI-Hinweise, keine Secrets.
+    login.js nutzt das, um z.B. zu erkennen, wenn COOKIE_SECURE=true gesetzt
+    ist, die Seite aber ueber HTTP statt HTTPS aufgerufen wird - sonst wird
+    das Session-Cookie vom Browser still verworfen und der Login schlaegt
+    ohne sichtbare Fehlermeldung fehl (Cookie-Set klappt, nur Speichern nicht)."""
+    return {"cookie_secure": COOKIE_SECURE, "totp_required": bool(TOTP_SECRET)}
+
+
 class LoginRequest(pydantic.BaseModel):
     username: str
     password: str

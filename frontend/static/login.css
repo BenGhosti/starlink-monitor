@@ -42,15 +42,16 @@ html, body {
   width: 640px;
   height: 640px;
   transform: translate(-50%, -50%);
-  opacity: 0.5;
+  opacity: 0.9;
   pointer-events: none;
+  z-index: 0;
 }
-.login-dish { width: 100%; height: 100%; }
-.ring { fill: none; stroke-width: 1; }
-.ring-1 { stroke: #5ba3d022; animation: spin 60s linear infinite; }
-.ring-2 { stroke: #56d88f1c; animation: spin 40s linear infinite reverse; }
-.ring-3 { stroke: #7a5bd022; animation: spin 26s linear infinite; }
-.hub { fill: #5ba3d044; }
+.login-dish { width: 100%; height: 100%; overflow: visible; }
+.ring { fill: none; stroke-width: 1.5; }
+.ring-1 { stroke: #5ba3d066; animation: spin 60s linear infinite; }
+.ring-2 { stroke: #56d88f55; animation: spin 40s linear infinite reverse; }
+.ring-3 { stroke: #a06bd066; animation: spin 26s linear infinite; }
+.hub { fill: #5ba3d0aa; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .ring { animation: none; }
