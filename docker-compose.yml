@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+
+  collector:
+    build: ./collector
+    container_name: starlink-collector
+    restart: always
+    env_file: .env
+    volumes:
+      - /mnt/user/appdata/StarlinkMonitor/data:/data
+    network_mode: host
+
+  frontend:
+    build: ./frontend
+    container_name: starlink-frontend
+    restart: always
+    env_file: .env
+    volumes:
+      - /mnt/user/appdata/StarlinkMonitor/data:/data:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - collector

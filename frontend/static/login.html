@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anmeldung · Starlink Monitor</title>
+<link rel="stylesheet" href="/static/login.css">
+</head>
+<body>
+  <div class="login-scene">
+    <div class="login-orbit" aria-hidden="true">
+      <svg viewBox="0 0 400 400" class="login-dish">
+        <circle cx="200" cy="200" r="120" class="ring ring-1"></circle>
+        <circle cx="200" cy="200" r="90"  class="ring ring-2"></circle>
+        <circle cx="200" cy="200" r="60"  class="ring ring-3"></circle>
+        <circle cx="200" cy="200" r="4"   class="hub"></circle>
+      </svg>
+    </div>
+
+    <form class="login-card" id="loginForm" autocomplete="off">
+      <div class="login-brand">
+        <span class="login-logo">Starlink Monitor</span>
+        <span class="login-sub">Zugang zum Dashboard</span>
+      </div>
+
+      <label class="login-field">
+        <span>Benutzername</span>
+        <input type="text" id="loginUser" name="username" autocomplete="username" required autofocus>
+      </label>
+
+      <label class="login-field">
+        <span>Passwort</span>
+        <input type="password" id="loginPass" name="password" autocomplete="current-password" required>
+      </label>
+
+      <label class="login-field" id="loginTotpField">
+        <span>2FA-Code (falls aktiviert)</span>
+        <input type="text" id="loginTotp" name="totp_code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="123456">
+      </label>
+
+      <button type="submit" class="login-submit" id="loginSubmit">Anmelden</button>
+
+      <div class="login-error" id="loginError" style="display:none"></div>
+    </form>
+
+    <div class="login-footer">Unraid · Dedicated Frankfurt</div>
+  </div>
+
+<script src="/static/login.js"></script>
+</body>
+</html>
