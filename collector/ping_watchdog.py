@@ -1,12 +1,12 @@
 """
 ping_watchdog.py
-Pingt 1.1.1.1 und 8.8.8.8 alle 2 Sekunden per ICMP.
-- Erst nach DISCONNECT_CONFIRM_FAILURES aufeinanderfolgenden Fehlschlaegen
-  (beide Ziele unerreichbar) wird ein Disconnect gewertet - ein einzelner
-  verlorener Ping (Jitter, kurzer Netz-Hickser) loest noch keinen Fehlalarm aus.
-- Latenzspitzen > 200ms fuer > 10s -> separates Event + Alert.
-- Obstruction-Schwelle (>5% Drop fuer >30s) wird hier ebenfalls ueberwacht,
-  da sie auf denselben Latenz/Drop-Samples basiert wie der Pingcheck.
+Pings 1.1.1.1 and 8.8.8.8 every 2 seconds via ICMP.
+- A disconnect is only confirmed after DISCONNECT_CONFIRM_FAILURES consecutive
+  failures (both targets unreachable) - a single lost ping doesn't trigger
+  a false alarm.
+- Latency spikes > 200ms for > 10s get their own event + alert.
+- The obstruction threshold (>5% drop for >30s) is monitored here too, since
+  it's based on the same latency/drop samples as the ping check.
 """
 
 import asyncio
@@ -25,18 +25,12 @@ PING_TARGETS = ["1.1.1.1", "8.8.8.8"]
 POLL_INTERVAL_S = 2
 PING_TIMEOUT_S = 1.5
 
-# Erst nach N aufeinanderfolgenden Fehlschlaegen (bei 2s Intervall = N*2 Sekunden)
-# wird tatsaechlich ein Disconnect gemeldet. Verhindert Fehlalarme durch
-# einzelne verlorene ICMP-Pakete, die nichts mit einem echten Ausfall zu tun haben.
-#
-# Wichtig: Starlink fuehrt routinemaessig Satelliten-Handover durch (ueblicherweise
-# alle ~15s), wobei kurzzeitig (typischerweise <1-2s) keine Pakete durchkommen.
-# Das ist normaler Betrieb, kein Ausfall. Mit der alten Schwelle von 3 Fehlschlaegen
-# (6s) konnten zwei kurz aufeinanderfolgende Handover-Drops faelschlich als
-# zusammenhaengender Ausfall gewertet werden. 8 Fehlschlaege (16s) liegen sicher
-# ueber einem einzelnen Handover-Hickser, melden aber immer noch zeitnah echte
-# Ausfaelle (Stromausfall, Kabel raus, echte Funkstoerung).
-# Per DISCONNECT_CONFIRM_FAILURES env var ohne Code-Aenderung weiter tunbar.
+# Only report a disconnect after N consecutive failures (N*2 seconds at a 2s
+# interval). Starlink routinely does satellite handovers (roughly every
+# ~15s) with a brief (<1-2s) gap in packets - that's normal operation, not
+# an outage. A lower threshold risked treating two back-to-back handover
+# drops as one continuous outage; 8 failures (16s) is safely above a single
+# handover blip while still reporting real outages promptly.
 DISCONNECT_CONFIRM_FAILURES = int(os.environ.get("DISCONNECT_CONFIRM_FAILURES", "8"))
 
 LATENCY_SPIKE_THRESHOLD_MS = 200
@@ -47,8 +41,8 @@ OBSTRUCTION_MIN_DURATION_S = 30
 
 
 async def ping_host(host: str) -> float | None:
-    """Fuehrt einen einzelnen ICMP-Ping aus (System-Binary, kein root-only raw socket nötig
-    dank `ping` Systemtool). Gibt RTT in ms zurueck oder None bei Timeout/Fehler."""
+    """Runs a single ICMP ping via the system `ping` binary (no raw socket /
+    root needed). Returns RTT in ms, or None on timeout/error."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ping", "-c", "1", "-W", str(PING_TIMEOUT_S), host,
@@ -59,7 +53,7 @@ async def ping_host(host: str) -> float | None:
         if proc.returncode != 0:
             return None
         text = stdout.decode(errors="ignore")
-        # Beispiel: "time=14.2 ms"
+        # e.g. "time=14.2 ms"
         for token in text.split():
             if token.startswith("time="):
                 return float(token.split("=")[1].replace("ms", ""))
@@ -69,7 +63,7 @@ async def ping_host(host: str) -> float | None:
 
 
 async def check_targets() -> tuple[bool, float | None]:
-    """Pingt alle Targets parallel. Gibt (reachable, beste_latenz_ms) zurueck."""
+    """Pings all targets in parallel. Returns (reachable, best_latency_ms)."""
     results = await asyncio.gather(*(ping_host(h) for h in PING_TARGETS))
     latencies = [r for r in results if r is not None]
     reachable = len(latencies) > 0
@@ -87,19 +81,19 @@ async def log_event(db, ts: int, type_: str, duration_s: float | None, details: 
 
 async def run():
     logger.info(
-        "ping_watchdog startet gegen %s, Intervall %ss, Bestaetigung nach %s Fehlschlaegen (%ss)",
+        "ping_watchdog starting against %s, interval %ss, confirm after %s failures (%ss)",
         PING_TARGETS, POLL_INTERVAL_S, DISCONNECT_CONFIRM_FAILURES,
         DISCONNECT_CONFIRM_FAILURES * POLL_INTERVAL_S,
     )
     db = await get_db()
 
-    # Disconnect-Tracking
+    # Disconnect tracking
     consecutive_failures = 0
-    disconnect_start: float | None = None  # erst gesetzt, wenn Schwelle ueberschritten -> echter Disconnect
+    disconnect_start: float | None = None  # only set once the threshold is crossed
     disconnect_confirmed = False
     last_known_latency: float | None = None
 
-    # Latenzspitzen-Tracking
+    # Latency-spike tracking
     spike_start: float | None = None
     spike_peak: float = 0.0
 
@@ -110,50 +104,50 @@ async def run():
 
             reachable, latency = await check_targets()
 
-            # --- Disconnect-Logik mit Bestaetigungsschwelle ---
+            # --- Disconnect logic with confirmation threshold ---
             if not reachable:
                 consecutive_failures += 1
                 if disconnect_start is None:
-                    # Erster Fehlschlag dieser Serie - Zeitpunkt merken, aber noch
-                    # nicht als Disconnect werten, bis die Schwelle erreicht ist.
+                    # First failure in this streak - remember the time, but
+                    # don't count it as a disconnect until the threshold is hit.
                     disconnect_start = time.monotonic()
 
                 if consecutive_failures >= DISCONNECT_CONFIRM_FAILURES and not disconnect_confirmed:
                     disconnect_confirmed = True
-                    logger.warning("Disconnect bestaetigt um %s (%s aufeinanderfolgende Fehlschlaege)",
+                    logger.warning("Disconnect confirmed at %s (%s consecutive failures)",
                                     now, consecutive_failures)
                     await send_alert(
                         title="🔴 Starlink Disconnect",
-                        description="Beide Ping-Ziele unerreichbar.",
+                        description="Both ping targets unreachable.",
                         color=COLOR_RED,
                         fields={
-                            "Letzte bekannte Latenz": f"{last_known_latency} ms" if last_known_latency else "n/a",
-                            "Wetter": get_last_weather_summary(),
+                            "Last known latency": f"{last_known_latency} ms" if last_known_latency else "n/a",
+                            "Weather": get_last_weather_summary(),
                         },
                         db=db,
                     )
             else:
                 last_known_latency = latency
                 if disconnect_confirmed:
-                    # Nur wenn wirklich ein bestaetigter Disconnect lief, Event + Alert fuer das Ende
+                    # Only log/alert the end of an outage if it was actually confirmed
                     duration = time.monotonic() - disconnect_start
                     await log_event(
                         db, now, "disconnect", duration,
                         {"last_known_latency_ms": last_known_latency},
                     )
                     await send_alert(
-                        title="🟢 Starlink wieder verbunden",
-                        description=f"Ausfall beendet nach {duration:.1f}s.",
+                        title="🟢 Starlink Reconnected",
+                        description=f"Outage ended after {duration:.1f}s.",
                         color=COLOR_GREEN,
                         db=db,
                     )
-                # Serie zuruecksetzen, egal ob es ein bestaetigter Disconnect war
-                # oder nur ein kurzer, unter der Schwelle gebliebener Hickser.
+                # Reset the streak either way (confirmed disconnect or just
+                # a brief blip that stayed under the threshold).
                 consecutive_failures = 0
                 disconnect_start = None
                 disconnect_confirmed = False
 
-            # --- Latenzspitzen-Logik ---
+            # --- Latency-spike logic ---
             if reachable and latency is not None and latency > LATENCY_SPIKE_THRESHOLD_MS:
                 if spike_start is None:
                     spike_start = time.monotonic()
@@ -169,8 +163,8 @@ async def run():
                             {"peak_ms": spike_peak},
                         )
                         await send_alert(
-                            title="🟡 Latenzspitze",
-                            description=f"Latenz > {LATENCY_SPIKE_THRESHOLD_MS}ms fuer {spike_duration:.1f}s.",
+                            title="🟡 Latency Spike",
+                            description=f"Latency > {LATENCY_SPIKE_THRESHOLD_MS}ms for {spike_duration:.1f}s.",
                             color=COLOR_YELLOW,
                             fields={"Peak": f"{spike_peak:.0f} ms"},
                             db=db,

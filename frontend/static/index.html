@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -15,10 +15,9 @@
   <div class="topbar">
     <span class="logo">Starlink Monitor</span>
     <div class="topbar-right">
-      <span class="topbar-meta" id="topbarMeta">Unraid · Gigabit</span>
-      <button class="admin-btn" id="adminBtn" title="Datenverwaltung">⚙</button>
-      <button class="live-btn live-active" id="liveModeBtn" title="Live-Modus an/aus">⏸ Pause</button>
-      <span class="status-pill" id="connStatus"><span class="dot" id="connDot"></span><span id="connText">Verbinde...</span></span>
+      <button class="admin-btn" id="adminBtn" title="Data Management">⚙</button>
+      <button class="live-btn live-active" id="liveModeBtn" title="Toggle live mode">⏸ Pause</button>
+      <span class="status-pill" id="connStatus"><span class="dot" id="connDot"></span><span id="connText">Connecting...</span></span>
     </div>
   </div>
 
@@ -26,48 +25,48 @@
   <div class="admin-overlay" id="adminOverlay">
     <div class="admin-modal">
       <div class="admin-header">
-        <span class="admin-title">Datenverwaltung</span>
+        <span class="admin-title">Data Management</span>
         <button class="admin-close" id="adminClose">✕</button>
       </div>
 
       <div class="admin-section">
-        <div class="admin-section-label">Zeitraum (optional)</div>
+        <div class="admin-section-label">Time Range (optional)</div>
         <div class="admin-row">
-          <label>Von</label>
+          <label>From</label>
           <input type="datetime-local" id="adminFrom" class="admin-input">
-          <label>Bis</label>
+          <label>To</label>
           <input type="datetime-local" id="adminTo" class="admin-input">
         </div>
         <div class="admin-presets">
-          <button class="admin-preset" data-days="7">Älter als 7 Tage</button>
-          <button class="admin-preset" data-days="30">Älter als 30 Tage</button>
-          <button class="admin-preset" data-days="90">Älter als 90 Tage</button>
-          <button class="admin-preset" data-days="0">Alles (kein Filter)</button>
+          <button class="admin-preset" data-days="7">Older than 7 days</button>
+          <button class="admin-preset" data-days="30">Older than 30 days</button>
+          <button class="admin-preset" data-days="90">Older than 90 days</button>
+          <button class="admin-preset" data-days="0">Everything (no filter)</button>
         </div>
       </div>
 
       <div class="admin-section">
-        <div class="admin-section-label">Löschen</div>
+        <div class="admin-section-label">Delete</div>
         <div class="admin-actions">
           <button class="admin-action-btn" data-target="events">
             <span class="admin-action-icon">⚡</span>
             <span>Events &amp; Disconnects</span>
-            <span class="admin-action-desc">Ausfall- und Latenzspitzen-Logs</span>
+            <span class="admin-action-desc">Outage and latency-spike logs</span>
           </button>
           <button class="admin-action-btn" data-target="metrics">
             <span class="admin-action-icon">📊</span>
-            <span>Ping/Latenz-Daten</span>
-            <span class="admin-action-desc">Rohmessungen + Minuten-Aggregate</span>
+            <span>Ping/Latency Data</span>
+            <span class="admin-action-desc">Raw samples + minute aggregates</span>
           </button>
           <button class="admin-action-btn" data-target="speedtests">
             <span class="admin-action-icon">🚀</span>
-            <span>Speedtest-Ergebnisse</span>
-            <span class="admin-action-desc">Alle gemessenen Up/Download-Werte</span>
+            <span>Speedtest Results</span>
+            <span class="admin-action-desc">All measured up/download values</span>
           </button>
           <button class="admin-action-btn admin-action-btn--danger" data-target="all">
             <span class="admin-action-icon">🗑</span>
-            <span>Gesamte Historie</span>
-            <span class="admin-action-desc">Events + Metriken + Speedtests + Wetter</span>
+            <span>Entire History</span>
+            <span class="admin-action-desc">Events + Metrics + Speedtests + Weather</span>
           </button>
         </div>
       </div>
@@ -76,7 +75,7 @@
     </div>
   </div>
 
-  <!-- ============ WETTER-LEISTE ============ -->
+  <!-- ============ WEATHER BAR ============ -->
   <div class="weather-bar" id="weatherBar">
     <span class="weather-city" id="weatherCity">–</span>
     <span style="color:#c8d6e5" id="weatherMain">–</span>
@@ -84,26 +83,26 @@
     <span class="weather-warn" id="weatherWarn" style="display:none"></span>
   </div>
 
-  <!-- ============ STAT-KACHELN ============ -->
-  <div class="section-label">Übersicht · letzte 24 Stunden</div>
+  <!-- ============ STAT TILES ============ -->
+  <div class="section-label">Overview · last 24 hours</div>
   <div class="stat-row">
     <div class="stat">
       <div class="stat-label">Ping Drop</div>
       <div class="stat-val ok" id="statDrop">– %</div>
     </div>
     <div class="stat">
-      <div class="stat-label">Latenz</div>
+      <div class="stat-label">Latency</div>
       <div class="stat-val blue" id="statLatency">– ms</div>
     </div>
     <div class="stat stat--wide">
-      <div class="stat-label">Durchsatz (live)</div>
+      <div class="stat-label">Throughput (live)</div>
       <div class="stat-val-dual">
         <span><span class="stat-val-sep">↓</span><span class="stat-val ok" id="statDownload">– Mbit/s</span></span>
         <span><span class="stat-val-sep">↑</span><span class="stat-val blue" id="statUpload">– Mbit/s</span></span>
       </div>
     </div>
     <div class="stat">
-      <div class="stat-label">Ausfälle 24 h</div>
+      <div class="stat-label">Outages 24h</div>
       <div class="stat-val ok" id="statDisconnects">–</div>
     </div>
     <div class="stat">
@@ -112,23 +111,23 @@
     </div>
   </div>
 
-  <!-- ============ PEAK-WERTE (aus 2s-Live-Abtastungen) ============ -->
+  <!-- ============ PEAK VALUES (from 2s live samples) ============ -->
   <div class="panel">
     <div class="panel-title">
-      <span>Bestwerte · aus Live-Abtastung (2s)</span>
+      <span>Best Values · from live sampling (2s)</span>
       <div class="range-btns" data-target="peak">
-        <span class="rb active" data-range="1d">Täglich</span>
-        <span class="rb" data-range="7d">Wöchentlich</span>
-        <span class="rb" data-range="1m">Monatlich</span>
-        <span class="rb" data-range="3m">3 Monate</span>
-        <span class="rb" data-range="6m">6 Monate</span>
-        <span class="rb" data-range="12m">Jährlich</span>
-        <span class="rb" data-range="all">Gesamt</span>
+        <span class="rb active" data-range="1d">Daily</span>
+        <span class="rb" data-range="7d">Weekly</span>
+        <span class="rb" data-range="1m">Monthly</span>
+        <span class="rb" data-range="3m">3 Months</span>
+        <span class="rb" data-range="6m">6 Months</span>
+        <span class="rb" data-range="12m">Yearly</span>
+        <span class="rb" data-range="all">All</span>
       </div>
     </div>
     <div class="stat-row">
       <div class="stat">
-        <div class="stat-label">Beste Latenz</div>
+        <div class="stat-label">Best Latency</div>
         <div class="stat-val blue" id="peakLatency">– ms</div>
       </div>
       <div class="stat">
@@ -142,8 +141,8 @@
     </div>
   </div>
 
-  <!-- ============ HAUPT-GRAPHEN (Ping Drop + Latenz) ============ -->
-  <div class="section-label">Verbindungsqualität</div>
+  <!-- ============ MAIN CHARTS (Ping Drop + Latency) ============ -->
+  <div class="section-label">Connection Quality</div>
   <div class="main-grid">
     <div class="panel">
       <div class="panel-title">
@@ -165,7 +164,7 @@
 
     <div class="panel">
       <div class="panel-title">
-        <span>Latenz · live</span>
+        <span>Latency · live</span>
         <div class="range-btns" data-target="latency">
           <span class="rb active" data-range="1d">1d</span>
           <span class="rb" data-range="7d">7d</span>
@@ -185,7 +184,7 @@
   <div class="main-grid">
     <div class="panel">
       <div class="panel-title">
-        <span>Durchsatz (Down/Up) · live</span>
+        <span>Throughput (Down/Up) · live</span>
         <div class="range-btns" data-target="throughput">
           <span class="rb active" data-range="1d">1d</span>
           <span class="rb" data-range="7d">7d</span>
@@ -203,25 +202,25 @@
 
     <div class="panel">
       <div class="panel-title">
-        <span>Sky View · Sichtfeld</span>
-        <span style="color:#2a3d52;font-size:9px">N oben · Mitte=Zenit · 90°=Horizont</span>
+        <span>Sky View · Field of View</span>
+        <span style="color:#2a3d52;font-size:9px">N up · center=zenith · 90°=horizon</span>
       </div>
       <div class="dome-wrap">
         <canvas id="domCanvas" width="220" height="220"></canvas>
         <div class="dome-legend">
-          <span class="dome-legend-dot" style="background:#56d88f"></span>Frei
-          <span class="dome-legend-dot" style="background:#e0566e;margin-left:10px"></span>Blockiert
-          <span class="dome-legend-dot dome-legend-dot--dish" style="margin-left:10px"></span>Schüssel
+          <span class="dome-legend-dot" style="background:#56d88f"></span>Clear
+          <span class="dome-legend-dot" style="background:#e0566e;margin-left:10px"></span>Blocked
+          <span class="dome-legend-dot dome-legend-dot--dish" style="margin-left:10px"></span>Dish
         </div>
       </div>
     </div>
   </div>
 
   <!-- ============ SPEEDTEST ============ -->
-  <div class="section-label">Speedtest (alle 8 Stunden)</div>
+  <div class="section-label">Speedtest (every 8 hours)</div>
   <div class="panel" style="margin-bottom:18px">
     <div class="panel-title">
-      <span>Download / Upload je Test</span>
+      <span>Download / Upload per Test</span>
       <div style="display:flex;align-items:center;gap:10px">
         <span id="speedtestCount" style="font-size:9px;color:#3a5070"></span>
         <div class="range-btns" data-target="speedtest">
@@ -240,11 +239,11 @@
     </div>
   </div>
 
-  <!-- ============ TRAFFIC / DATENVOLUMEN ============ -->
-  <div class="section-label">Datenvolumen (gesendet/empfangen)</div>
+  <!-- ============ TRAFFIC / DATA VOLUME ============ -->
+  <div class="section-label">Data Volume (sent/received)</div>
   <div class="panel" style="margin-bottom:18px">
     <div class="panel-title">
-      <span>Download / Upload Volumen</span>
+      <span>Download / Upload Volume</span>
       <div style="display:flex;align-items:center;gap:10px">
         <span id="trafficTotal" style="font-size:9px;color:#3a5070"></span>
         <div class="range-btns" data-target="traffic">
@@ -263,17 +262,17 @@
     </div>
   </div>
 
-  <!-- ============ DISH-STATUS ============ -->
-  <div class="section-label">Dish-Status</div>
+  <!-- ============ DISH STATUS ============ -->
+  <div class="section-label">Dish Status</div>
   <div class="dish-grid">
     <div class="panel dish-panel">
-      <div class="panel-title"><span>Ausrichtung</span></div>
+      <div class="panel-title"><span>Orientation</span></div>
       <div class="compass-wrap">
         <svg id="compassSvg" viewBox="0 0 160 160" width="100" height="100" class="compass" preserveAspectRatio="xMidYMid meet">
           <circle cx="80" cy="80" r="70" class="compass-ring"></circle>
           <circle cx="80" cy="80" r="45" class="compass-ring-inner"></circle>
           <text x="80" y="16" class="compass-label" text-anchor="middle">N</text>
-          <text x="148" y="84" class="compass-label" text-anchor="middle">O</text>
+          <text x="148" y="84" class="compass-label" text-anchor="middle">E</text>
           <text x="80" y="150" class="compass-label" text-anchor="middle">S</text>
           <text x="12" y="84" class="compass-label" text-anchor="middle">W</text>
           <line id="compassNeedle" x1="80" y1="80" x2="80" y2="20" class="compass-needle"></line>
@@ -287,9 +286,9 @@
     </div>
 
     <div class="panel dish-panel">
-      <div class="panel-title"><span>Geräteinfo</span></div>
+      <div class="panel-title"><span>Device Info</span></div>
       <div class="info-rows">
-        <div class="info-row"><span>Device-ID</span><span id="dishDeviceId">–</span></div>
+        <div class="info-row"><span>Device ID</span><span id="dishDeviceId">–</span></div>
         <div class="info-row"><span>Hardware</span><span id="dishHardware">–</span></div>
         <div class="info-row"><span>Software</span><span id="dishSoftware">–</span></div>
         <div class="info-row"><span>Uptime</span><span id="dishUptime">–</span></div>
@@ -300,47 +299,48 @@
     <div class="panel dish-panel">
       <div class="panel-title"><span>GPS &amp; Signal</span></div>
       <div class="info-rows">
-        <div class="info-row"><span>GPS bereit</span><span id="gpsReady">–</span></div>
-        <div class="info-row"><span>GPS aktiviert</span><span id="gpsEnabled">–</span></div>
-        <div class="info-row"><span>Satelliten</span><span id="gpsSats">–</span></div>
-        <div class="info-row"><span>SNR ok</span><span id="snrOk">–</span></div>
+        <div class="info-row"><span>GPS Ready</span><span id="gpsReady">–</span></div>
+        <div class="info-row"><span>GPS Enabled</span><span id="gpsEnabled">–</span></div>
+        <div class="info-row"><span>Satellites</span><span id="gpsSats">–</span></div>
+        <div class="info-row"><span>SNR OK</span><span id="snrOk">–</span></div>
       </div>
     </div>
 
     <div class="panel dish-panel">
-      <div class="panel-title"><span>Obstruktion</span></div>
+      <div class="panel-title"><span>Obstruction</span></div>
       <div class="info-rows">
-        <div class="info-row"><span>Aktuell verdeckt</span><span id="obstrCurrent">–</span></div>
-        <div class="info-row"><span>Anteil verdeckt</span><span id="obstrFraction">–</span></div>
-        <div class="info-row"><span>Ø Dauer</span><span id="obstrDuration">–</span></div>
-        <div class="info-row"><span>Ø Intervall</span><span id="obstrInterval">–</span></div>
+        <div class="info-row"><span>Currently Obstructed</span><span id="obstrCurrent">–</span></div>
+        <div class="info-row"><span>Obstructed Fraction</span><span id="obstrFraction">–</span></div>
+        <div class="info-row"><span>Avg. Duration</span><span id="obstrDuration">–</span></div>
+        <div class="info-row"><span>Avg. Interval</span><span id="obstrInterval">–</span></div>
       </div>
     </div>
   </div>
 
   <div class="panel" style="margin-bottom:18px">
     <div class="panel-title">
-      <span>Geräte-Alarme</span>
+      <span>Device Alerts</span>
       <span id="alertSummary" style="color:#2a3d52;font-size:9px"></span>
     </div>
     <div class="alert-grid" id="alertGrid">
-      <div class="event-empty">Lade Alarme...</div>
+      <div class="event-empty">Loading alerts...</div>
     </div>
   </div>
 
   <!-- ============ EVENT LOG ============ -->
-  <div class="section-label">Event-Log</div>
+  <div class="section-label">Event Log</div>
   <div class="panel" style="margin-bottom:12px">
-    <div class="panel-title"><span>Letzte 7 Tage</span></div>
+    <div class="panel-title"><span>Last 7 Days</span></div>
     <div class="event-list" id="eventList">
-      <div class="event-empty">Lade Events...</div>
+      <div class="event-empty">Loading events...</div>
     </div>
   </div>
 
   <!-- ============ FOOTER ============ -->
   <div class="bottom-bar">
-    <span id="footerStats">DB: – · – Datenpunkte · seit –</span>
-    <button class="export-btn" id="exportBtn">CSV exportieren</button>
+    <span id="footerStats">DB: – · – data points · since –</span>
+    <span class="brand-credit">Developed by <a href="https://ben-ghosti.de" target="_blank" rel="noopener">Ben Ghosti</a></span>
+    <button class="export-btn" id="exportBtn">Export CSV</button>
   </div>
 
 </div>

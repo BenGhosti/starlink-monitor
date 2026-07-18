@@ -1,9 +1,8 @@
 """
 db.py
-Zentrales SQLite-Setup für den Starlink-Monitor.
-Wird von allen Collector-Prozessen (metrics, ping, weather, speedtest)
-und vom Cleanup-Job importiert, damit Schema & Pragmas an genau einer
-Stelle gepflegt werden.
+Central SQLite setup for Starlink Monitor. Imported by every collector
+process (metrics, ping, weather, speedtest) and the cleanup job, so schema
+and pragmas live in exactly one place.
 """
 
 import logging
@@ -13,17 +12,16 @@ import aiosqlite
 DB_PATH = "/data/starlink.db"
 logger = logging.getLogger("db")
 
-# Polling-Takt von metrics_collector.py (POLL_INTERVAL_S dort) - hier zentral
-# gepflegt, weil sowohl der Minuten-Aggregator als auch cleanup.py daraus die
-# Traffic-Bytes einer Rohdaten-Zeile berechnen (bps * Intervall / 8).
+# Collector poll interval (POLL_INTERVAL_S in metrics_collector.py). Kept
+# here so both the minutely aggregator and cleanup.py can compute a raw
+# row's traffic bytes as bps * interval / 8.
 RAW_SAMPLE_INTERVAL_S = 2
 
-# Pragmas fuer dauerhaften Betrieb mit Millionen Zeilen (2s-Takt) und
-# gleichzeitigem Lesezugriff des frontend-Containers (WAL erlaubt paralleles
-# Lesen waehrend geschrieben wird). cache_size/mmap_size halten den heissen
-# Teil der DB (juengste Tage) im RAM, busy_timeout verhindert "database is
-# locked"-Fehler bei kurzen Schreib-/Compress-Ueberschneidungen statt sofort
-# zu failen.
+# Tuned for sustained high-frequency writes (2s ticks) with concurrent reads
+# from the frontend container. WAL allows readers and the writer to run
+# concurrently; cache_size/mmap_size keep the hot (recent) part of the DB in
+# RAM; busy_timeout avoids "database is locked" errors on brief write/compress
+# overlaps instead of failing immediately.
 PRAGMAS = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -60,10 +58,10 @@ CREATE TABLE IF NOT EXISTS metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts);
 
--- Statische/selten wechselnde Geraeteinfo der Dish. Immer genau 1 Zeile (id=1),
--- die der metrics_collector bei jedem Tick per UPSERT aktuell haelt. Getrennt
--- von `metrics`, damit String-Felder (Versionen, Geraete-ID) nicht 43.000x/Tag
--- redundant in der hochfrequenten Tabelle landen.
+-- Static/rarely-changing dish info. Always exactly one row (id=1), kept
+-- current by metrics_collector via UPSERT on every tick. Separate from
+-- `metrics` so string fields (versions, device ID) don't get duplicated
+-- into the high-frequency table tens of thousands of times a day.
 CREATE TABLE IF NOT EXISTS dish_info (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     device_id TEXT,
@@ -107,7 +105,7 @@ CREATE TABLE IF NOT EXISTS weather (
 );
 CREATE INDEX IF NOT EXISTS idx_weather_ts ON weather(ts);
 
--- Komprimierte Stunden-Aggregate fuer Rohdaten > 90 Tage (siehe cleanup.py)
+-- Compressed hourly aggregates for raw data > 90 days old (see cleanup.py).
 CREATE TABLE IF NOT EXISTS metrics_hourly (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_hour INTEGER NOT NULL UNIQUE,
@@ -123,17 +121,12 @@ CREATE TABLE IF NOT EXISTS metrics_hourly (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_hourly_ts ON metrics_hourly(ts_hour);
 
--- Laufend (nicht erst nach 90 Tagen) befuellte Minuten-Aggregate mit
--- min/max/avg fuer alle Hauptfelder. Zweck: bei Zeitraeumen ab 7d soll die
--- UI nicht mehr Rohdaten (2s-Takt) aggregieren muessen (teuer, ungenau beim
--- Hovern), sondern direkt auf fertigen Minuten-Buckets aufbauen, die zusaetzlich
--- Min/Max mitfuehren fuer aussagekraeftige Tooltips ("Tiefstwert/Hoechstwert
--- in dieser Minute"). Wird von metrics_minutely_aggregator.py im Collector
--- kontinuierlich nachgefuehrt (Minute X wird befuellt, sobald X+1 begonnen hat).
--- down_bytes/up_bytes: tatsaechlich uebertragenes Datenvolumen dieser Minute
--- (SUM(bps)*RAW_SAMPLE_INTERVAL_S/8 ueber alle 2s-Samples), fuer die
--- Traffic-Anzeige im Dashboard - exakter als avg_bps*60s, da Luecken
--- (Collector-Downtime) durch sample_count implizit beruecksichtigt sind.
+-- Minute aggregates, filled continuously (not just after 90 days) with
+-- min/max/avg for the main fields, so ranges >= 7d can build charts
+-- straight from ready-made buckets instead of aggregating 2s raw data on
+-- every request. down_bytes/up_bytes hold the minute's actual transferred
+-- volume (SUM(bps) * RAW_SAMPLE_INTERVAL_S / 8), used by the traffic chart -
+-- more accurate than avg_bps*60s since gaps are reflected via sample_count.
 CREATE TABLE IF NOT EXISTS metrics_minutely (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_minute INTEGER NOT NULL UNIQUE,
@@ -155,13 +148,11 @@ CREATE TABLE IF NOT EXISTS metrics_minutely (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_minutely_ts ON metrics_minutely(ts_minute);
 
--- Dritte Kompressionsstufe fuer sehr lange Historien (Jahre): metrics_hourly
--- ist bereits deutlich kleiner als Rohdaten, wird aber bei Multi-Jahres-
--- Betrieb selbst gross genug, um sich zu lohnen. cleanup.py verdichtet
--- metrics_hourly-Zeilen aelter als HOURLY_ROLLUP_DAYS zu Tages-Buckets hier
--- und loescht danach die verdichteten Stunden-Zeilen. sample_count ist die
--- Summe der zugrunde liegenden Stunden-sample_counts, damit ein gewichteter
--- Durchschnitt ueber mehrere Rollup-Stufen hinweg korrekt bleibt.
+-- Third compression tier for multi-year histories: cleanup.py rolls up
+-- metrics_hourly rows older than HOURLY_ROLLUP_DAYS into daily buckets here
+-- and deletes the source hourly rows. sample_count is the sum of the
+-- underlying hourly sample_counts, so weighted averages stay correct across
+-- rollup stages.
 CREATE TABLE IF NOT EXISTS metrics_daily (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_day INTEGER NOT NULL UNIQUE,
@@ -177,11 +168,10 @@ CREATE TABLE IF NOT EXISTS metrics_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_daily_ts ON metrics_daily(ts_day);
 
--- Persistente Retry-Queue fuer Discord-Webhooks. Schlaegt ein Versand fehl
--- (z.B. weil das Internet selbst weg ist, nicht nur die Dish-Verbindung),
--- landet der Alert hier statt verloren zu gehen. Ein Hintergrund-Task in
--- discord_alert.py versucht die Queue periodisch erneut zu versenden, auch
--- ueber einen Container-Neustart hinweg (daher SQLite statt nur In-Memory).
+-- Persistent retry queue for Discord webhooks. If a send fails (e.g. the
+-- internet uplink itself is down, not just the dish), the alert lands here
+-- instead of being lost; discord_alert.py retries it in the background,
+-- surviving container restarts (hence SQLite, not just in-memory).
 CREATE TABLE IF NOT EXISTS alert_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_ts INTEGER NOT NULL,
@@ -194,7 +184,7 @@ CREATE INDEX IF NOT EXISTS idx_alert_queue_created ON alert_queue(created_ts);
 
 
 async def init_db():
-    """Legt Pragmas + Schema an. Idempotent, kann von jedem Prozess beim Start aufgerufen werden."""
+    """Applies pragmas + schema. Idempotent; safe to call from any process at startup."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(PRAGMAS)
         await db.executescript(SCHEMA)
@@ -203,18 +193,12 @@ async def init_db():
         await db.commit()
 
 
-# Erwartete Spalten je Tabelle mit ihrem SQL-Typ, fuer die automatische
-# Nachmigration bei bereits existierenden Datenbanken. WICHTIG: CREATE TABLE
-# IF NOT EXISTS (siehe SCHEMA oben) legt das Schema nur bei einer komplett
-# NEUEN Tabelle an - wurde die Tabelle schon einmal mit einer aelteren
-# Code-Version angelegt (z.B. vor Einfuehrung von direction_azimuth/gps_*/
-# uptime_s), fehlen diese Spalten in der bestehenden Tabelle fuer immer,
-# OHNE dass irgendwo ein Fehler auftritt - Inserts, die diese Spalten nicht
-# referenzieren, laufen weiter normal durch, und die fehlenden Werte werden
-# stillschweigend nie geschrieben. Das aeussert sich im Frontend als "Daten
-# fehlen", ohne dass in den Logs ein offensichtlicher Fehler auftaucht.
-# _run_migrations() schliesst diese Luecke: ALTER TABLE ... ADD COLUMN ist in
-# SQLite eine billige, sofortige Operation (kein Tabellen-Rewrite noetig).
+# Expected columns per table, for auto-migrating pre-existing databases.
+# CREATE TABLE IF NOT EXISTS only applies the full schema to a brand-new
+# table; on a table created by an older code version, missing columns would
+# otherwise stay missing forever with no visible error (inserts that don't
+# reference them just silently never populate them). ALTER TABLE ... ADD
+# COLUMN is a cheap, instant operation in SQLite (no table rewrite).
 EXPECTED_COLUMNS = {
     "metrics": {
         "uptime_s": "INTEGER",
@@ -255,12 +239,12 @@ async def _run_migrations(db):
 
         for col_name, col_type in columns.items():
             if col_name not in existing:
-                logger.info("Migration: fuege fehlende Spalte %s.%s (%s) hinzu", table, col_name, col_type)
+                logger.info("Migration: adding missing column %s.%s (%s)", table, col_name, col_type)
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
 
 
 async def get_db():
-    """Liefert eine neue Connection mit den richtigen Pragmas (fuer Prozesse, die init_db schon liefen)."""
+    """New connection with the correct pragmas (for processes where init_db() already ran)."""
     db = await aiosqlite.connect(DB_PATH)
     await db.executescript(PRAGMAS)
     return db

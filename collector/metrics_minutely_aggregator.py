@@ -1,27 +1,23 @@
 """
 metrics_minutely_aggregator.py
-Laeuft als eigener Collector-Task und komprimiert kontinuierlich die jeweils
-letzte vollstaendig abgeschlossene Minute aus `metrics` (Rohdaten, 2s-Takt)
-in `metrics_minutely` (1 Zeile pro Minute, mit avg/min/max).
+Standalone collector task that continuously rolls up each just-completed
+minute of `metrics` (raw, 2s ticks) into `metrics_minutely` (one row per
+minute, with avg/min/max).
 
-Anders als cleanup.py (der nur EINMAL TAEGLICH alte Rohdaten komprimiert und
-loescht) laeuft dieser Aggregator durchgehend im Minutentakt und LOESCHT NICHT
-aus `metrics` - die Rohdaten bleiben fuer die 1d-Live-Ansicht (2s-Aufloesung)
-weiterhin vollstaendig erhalten. metrics_minutely ist eine zusaetzliche,
-parallel gepflegte Aggregat-Tabelle, die die API fuer Zeitraeume >= 7d nutzt,
-statt bei jeder Anfrage Millionen Rohzeilen zu GROUP BY aggregieren zu muessen.
+Unlike cleanup.py (which compresses+deletes old raw data once a day), this
+runs every minute and never deletes from `metrics` - raw data stays fully
+intact for the 1d live view (2s resolution). metrics_minutely is an
+additional, parallel aggregate table the API uses for ranges >= 7d instead
+of GROUP BY-aggregating millions of raw rows on every request.
 
-Idempotent: ON CONFLICT(ts_minute) DO UPDATE, falls eine Minute aus
-irgendeinem Grund erneut verarbeitet wird (z.B. Collector-Neustart).
+Idempotent: ON CONFLICT(ts_minute) DO UPDATE in case a minute gets
+reprocessed (e.g. collector restart).
 
-Backfill bei Start: Ohne explizite Nachbearbeitung wuerden Minuten, die
-waehrend einer Collector-Ausfallzeit (Stromausfall, Neustart, Deploy) NICHT
-"die letzte abgeschlossene Minute" waren, fuer immer in metrics_minutely
-fehlen - obwohl ihre Rohdaten in `metrics` (90 Tage Retention) noch vorhanden
-sind. Das wuerde sich als Luecke in der 7d/14d/1m-Ansicht zeigen, obwohl die
-Daten technisch noch da waeren. backfill_missing_minutes() schliesst das beim
-Start einmalig (und ist danach ueberfluessig, da der Live-Takt jede Minute
-zeitnah verarbeitet).
+Backfill on start: without it, minutes that weren't "the last completed
+minute" during a collector outage would be missing from metrics_minutely
+forever, even though their raw data (90-day retention) still exists. That
+would show as a gap in the 7d/14d/1m view despite the data technically
+being there. backfill_missing_minutes() closes that gap once at startup.
 """
 
 import asyncio
@@ -33,13 +29,13 @@ from db import get_db, RAW_SAMPLE_INTERVAL_S
 logger = logging.getLogger("metrics_minutely_aggregator")
 
 MINUTE_S = 60
-RUN_INTERVAL_S = 60  # einmal pro Minute pruefen, ob eine neue Minute abgeschlossen ist
-BACKFILL_MAX_MINUTES = 90 * 24 * 60  # nie weiter zurueck als die Rohdaten-Retention (90 Tage)
+RUN_INTERVAL_S = 60  # check once a minute whether a new minute has completed
+BACKFILL_MAX_MINUTES = 90 * 24 * 60  # never further back than the raw-data retention (90 days)
 
 
 async def aggregate_minute(db, ts_minute_start: int) -> bool:
-    """Aggregiert genau eine Minute [ts_minute_start, ts_minute_start+60).
-    Gibt True zurueck, wenn Daten gefunden und geschrieben wurden."""
+    """Aggregates exactly one minute [ts_minute_start, ts_minute_start+60).
+    Returns True if data was found and written."""
     ts_minute_end = ts_minute_start + MINUTE_S
 
     async with db.execute(
@@ -63,8 +59,8 @@ async def aggregate_minute(db, ts_minute_start: int) -> bool:
     if not sample_count:
         return False
 
-    # Datenvolumen dieser Minute: SUM(bps) ueber alle 2s-Samples * Intervall / 8
-    # (Bit -> Byte). Robuster als avg_bps*60s bei Luecken (Neustart, Ausfall).
+    # Data volume for this minute: SUM(bps) across all 2s samples * interval / 8
+    # (bit -> byte). More robust than avg_bps*60s across gaps (restarts, outages).
     down_bytes = int(row[12] * RAW_SAMPLE_INTERVAL_S / 8) if row[12] is not None else None
     up_bytes = int(row[13] * RAW_SAMPLE_INTERVAL_S / 8) if row[13] is not None else None
 
@@ -101,18 +97,17 @@ async def aggregate_minute(db, ts_minute_start: int) -> bool:
 
 
 async def backfill_missing_minutes(db) -> int:
-    """Findet abgeschlossene Minuten, die Rohdaten in `metrics` haben, aber
-    noch nicht in `metrics_minutely` stehen, und aggregiert sie nach.
-    Begrenzt auf BACKFILL_MAX_MINUTES, um bei einer riesigen/unerwarteten
-    Luecke (z.B. sehr alte Test-DB) nicht stundenlang zu blockieren.
-    Gibt die Anzahl nachgeholter Minuten zurueck."""
+    """Finds completed minutes that have raw data in `metrics` but are
+    missing from `metrics_minutely`, and aggregates them. Capped at
+    BACKFILL_MAX_MINUTES so a huge/unexpected gap doesn't block for hours.
+    Returns the number of minutes backfilled."""
     now = int(time.time())
     current_minute_start = (now // MINUTE_S) * MINUTE_S
 
     async with db.execute("SELECT MIN(ts) FROM metrics") as cur:
         row = await cur.fetchone()
     if not row or row[0] is None:
-        return 0  # noch gar keine Rohdaten vorhanden
+        return 0  # no raw data yet
 
     earliest_minute = (row[0] // MINUTE_S) * MINUTE_S
     oldest_allowed = current_minute_start - BACKFILL_MAX_MINUTES * MINUTE_S
@@ -123,7 +118,7 @@ async def backfill_missing_minutes(db) -> int:
 
     backfilled = 0
     ts_minute = earliest_minute
-    # current_minute_start selbst ist noch nicht abgeschlossen, daher < statt <=
+    # current_minute_start itself isn't complete yet, hence < not <=
     while ts_minute < current_minute_start:
         if ts_minute not in existing:
             try:
@@ -131,16 +126,16 @@ async def backfill_missing_minutes(db) -> int:
                 if wrote:
                     backfilled += 1
             except Exception:  # noqa: BLE001
-                logger.exception("Backfill fehlgeschlagen fuer Minute %s", ts_minute)
+                logger.exception("Backfill failed for minute %s", ts_minute)
         ts_minute += MINUTE_S
 
     if backfilled:
-        logger.info("Backfill abgeschlossen: %s fehlende Minuten nachtraeglich aggregiert.", backfilled)
+        logger.info("Backfill done: %s missing minutes aggregated.", backfilled)
     return backfilled
 
 
 async def run():
-    logger.info("metrics_minutely_aggregator startet, Intervall %ss", RUN_INTERVAL_S)
+    logger.info("metrics_minutely_aggregator starting, interval %ss", RUN_INTERVAL_S)
     db = await get_db()
 
     last_aggregated_minute: int | None = None
@@ -151,8 +146,8 @@ async def run():
         while True:
             now = int(time.time())
             current_minute_start = (now // MINUTE_S) * MINUTE_S
-            # Nur die VORHERIGE Minute aggregieren, da die aktuelle Minute
-            # noch nicht abgeschlossen ist (es kommen noch Datenpunkte rein).
+            # Only aggregate the PREVIOUS minute - the current one isn't
+            # complete yet (more data points are still coming in).
             target_minute = current_minute_start - MINUTE_S
 
             if target_minute != last_aggregated_minute:
@@ -161,7 +156,7 @@ async def run():
                     if wrote:
                         last_aggregated_minute = target_minute
                 except Exception:  # noqa: BLE001
-                    logger.exception("Fehler beim Aggregieren von Minute %s", target_minute)
+                    logger.exception("Error aggregating minute %s", target_minute)
 
             await asyncio.sleep(RUN_INTERVAL_S)
     finally:

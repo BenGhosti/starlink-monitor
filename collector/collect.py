@@ -1,12 +1,12 @@
 """
 collect.py
-Einstiegspunkt des `collector`-Containers.
-Startet metrics_collector, ping_watchdog, weather_poller, speedtest_runner
-und den cleanup-Job als parallele asyncio-Tasks in einem Prozess.
+Entry point for the `collector` container. Starts metrics_collector,
+ping_watchdog, weather_poller, speedtest_runner, and the cleanup job as
+parallel asyncio tasks in one process.
 
-Stuerzt ein Task ab, werden die anderen weiterhin geloggt (kein globaler Crash),
-aber der Prozess beendet sich, damit Docker (restart: always) ihn neu startet -
-so vermeiden wir einen "halb-toten" Container mit nur 2 von 5 laufenden Tasks.
+If a task crashes, the others keep running and it gets logged, but the
+process then exits so Docker (restart: always) restarts it - avoiding a
+"half-dead" container with only some of the 5 tasks still running.
 """
 
 import asyncio
@@ -31,9 +31,9 @@ logger = logging.getLogger("collect")
 
 
 async def main():
-    logger.info("Starlink-Monitor Collector startet...")
+    logger.info("Starlink Monitor collector starting...")
     await init_db()
-    logger.info("DB-Schema initialisiert.")
+    logger.info("DB schema initialized.")
 
     alert_queue_db = await get_db()
 
@@ -52,12 +52,12 @@ async def main():
     for task in done:
         exc = task.exception()
         if exc:
-            logger.error("Task '%s' ist abgestuerzt: %s", task.get_name(), exc, exc_info=exc)
+            logger.error("Task '%s' crashed: %s", task.get_name(), exc, exc_info=exc)
 
     for task in pending:
         task.cancel()
 
-    logger.error("Mindestens ein Collector-Task ist beendet - Prozess wird beendet (Docker restartet).")
+    logger.error("At least one collector task exited - shutting down process (Docker will restart it).")
     sys.exit(1)
 
 

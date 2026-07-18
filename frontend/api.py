@@ -1,24 +1,23 @@
 """
 api.py
-FastAPI-Backend des `frontend`-Containers - GENERISCHER DATEN-LAYER.
+FastAPI backend for the `frontend` container - a GENERIC DATA LAYER.
 
-Design-Prinzip (siehe BACKEND_GUIDE.md): Das Backend kennt KEINE
-Dashboard-spezifische Logik mehr (keine Range->Resolution-Aufloesung, keine
-Aggregation, keine Statistik-Berechnung, kein CSV-Format). Es stellt nur noch
-generische, sichere Lese-/Loesch-Zugriffe auf die SQLite-Tabellen bereit.
-Die gesamte Anzeige- und Aufbereitungslogik lebt im Frontend
-(static/api-client.js). Neue Charts/Auswertungen = nur JS aendern.
+Design principle (see BACKEND_GUIDE.md): the backend has no dashboard-
+specific logic (no range->resolution, no aggregation, no stats, no CSV
+format) - it only serves generic, safe read/delete access to the SQLite
+tables. All display/aggregation logic lives in the frontend
+(static/api-client.js). New charts/metrics = only touch JS.
 
-Endpunkte:
-- GET  /api/raw/{table}      generische gefilterte Zeilen-Abfrage
-- GET  /api/latest/{table}   juengste Zeile einer Tabelle
-- GET  /api/columns/{table}  Spaltenliste einer Tabelle (fuer generische Clients)
-- DELETE /api/admin/{table}  Zeilen in einem Zeitraum loeschen
-- WS   /ws/live              pusht die neueste `metrics`-Zeile roh, 2s-Takt
-- POST /api/login, /api/logout   Session-Cookie-Auth (siehe login.html)
-- GET  /login                Login-Seite (unauthentifiziert erreichbar)
-- /            index.html (leitet zu /login um, falls keine gueltige Session)
-- /static/*    statische Dateien
+Endpoints:
+- GET    /api/raw/{table}     generic filtered row query
+- GET    /api/latest/{table}  most recent row of a table
+- GET    /api/columns/{table} column list of a table (for generic clients)
+- DELETE /api/admin/{table}   delete rows in a time range
+- WS     /ws/live             pushes the newest `metrics` row raw, 2s cadence
+- POST   /api/login, /api/logout  session-cookie auth (see login.html)
+- GET    /login                login page (reachable unauthenticated)
+- GET    /              index.html (redirects to /login without a valid session)
+- /static/*             static files
 """
 
 import asyncio
@@ -49,30 +48,28 @@ STATIC_DIR = Path(__file__).parent / "static"
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "changeme")
 
-# Session-Auth ersetzt HTTP Basic Auth (siehe login.html/login.js). SESSION_SECRET
-# sollte in .env gesetzt sein; ohne expliziten Wert wird ein Fallback aus den
-# Admin-Zugangsdaten abgeleitet, damit Sessions wenigstens einen Prozess-Neustart
-# ueberleben (Warnung im Log, da weniger sicher als ein eigener zufaelliger Secret).
+# Session auth replaces HTTP Basic (see login.html/login.js). SESSION_SECRET
+# should be set in .env; without it, a fallback is derived from the admin
+# credentials so sessions at least survive a process restart (logged as a
+# warning, since it's less secure than a dedicated random secret).
 SESSION_SECRET = os.environ.get("SESSION_SECRET")
 if not SESSION_SECRET:
-    logger.warning("SESSION_SECRET nicht gesetzt - leite Fallback-Secret ab. Fuer Produktion in .env setzen!")
+    logger.warning("SESSION_SECRET not set - deriving a fallback. Set it in .env for production!")
     SESSION_SECRET = hashlib.sha256(f"{ADMIN_USER}:{ADMIN_PASS}:starlink-monitor".encode()).hexdigest()
 
 COOKIE_NAME = "sm_session"
-SESSION_TTL_S = 12 * 3600  # 12h, danach erneut einloggen
+SESSION_TTL_S = 12 * 3600  # 12h, then log in again
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 
-# 2FA (TOTP, RFC 6238) ist optional und rein ueber .env gesteuert - kein
-# DB-Schema noetig, daher unabhaengig vom sonstigen DB-Umbau nachruestbar,
-# ohne bestehende Daten anzufassen. Ist TOTP_SECRET gesetzt, verlangt
-# /api/login zusaetzlich zu Benutzername/Passwort einen 6-stelligen Code aus
-# einer Authenticator-App (Google Authenticator, Aegis, 1Password, ...).
-# Secret generieren: scripts/generate_2fa_secret.py
+# 2FA (TOTP, RFC 6238) is optional and purely .env-driven - no DB schema
+# involved, so it can be added/removed independently of the rest of the DB
+# work without touching existing data. If TOTP_SECRET is set, /api/login
+# requires a 6-digit code from an authenticator app in addition to
+# username/password. Generate a secret with scripts/generate_2fa_secret.py
 TOTP_SECRET = os.environ.get("TOTP_SECRET", "").strip()
 
-# Sehr einfache In-Memory-Rate-Limitierung fuer /api/login (kein Redis noetig
-# fuer eine Single-Instance-App). Bewusst simpel: IP -> Liste von Fehlversuch-
-# Zeitstempeln der letzten LOGIN_WINDOW_S Sekunden.
+# Simple in-memory rate limiting for /api/login (no Redis needed for a
+# single-instance app): IP -> list of failure timestamps within LOGIN_WINDOW_S.
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_S = 300
 _login_attempts: dict[str, list[float]] = {}
@@ -120,9 +117,9 @@ def _record_failed_attempt(ip: str) -> None:
     _login_attempts.setdefault(ip, []).append(time.time())
 
 
-# Allowlist: einzige Stelle, die neue Tabellen kennen muss. ts_col = Name der
-# Zeitstempel-Spalte (fuer from/to-Filter + Sortierung). Frontend fragt bei
-# Bedarf ueber /api/columns/{table} die volle Spaltenliste ab.
+# Allowlist: the one place that needs to know about a new table. ts_col is
+# the timestamp column name (for from/to filtering + ordering). The frontend
+# can fetch the full column list via /api/columns/{table} if needed.
 TABLES = {
     "metrics": "ts",
     "metrics_minutely": "ts_minute",
@@ -131,7 +128,7 @@ TABLES = {
     "events": "ts",
     "speedtests": "ts",
     "weather": "ts",
-    "dish_info": None,  # Singleton-Tabelle (id=1), kein Zeitfenster
+    "dish_info": None,  # singleton table (id=1), no time window
 }
 
 DEFAULT_LIMIT = 5000
@@ -139,40 +136,40 @@ MAX_LIMIT = 50000
 
 
 def check_auth(request: Request) -> str:
-    """Session-Cookie-Auth fuer /api/*-Endpunkte. Liefert 401 JSON statt einer
-    Browser-Login-Box - api-client.js faengt das ab und leitet zu /login um."""
+    """Session-cookie auth for /api/* endpoints. Returns 401 JSON instead of
+    a browser login box - api-client.js catches that and redirects to /login."""
     username = verify_session_cookie(request.cookies.get(COOKIE_NAME))
     if username is None:
-        raise HTTPException(status_code=401, detail="Nicht angemeldet.")
+        raise HTTPException(status_code=401, detail="Not authenticated.")
     return username
 
 
 async def _connect_with_retry(max_attempts: int = 15, delay_s: float = 2.0):
-    """Verbindet mit der SQLite-DB, mit Retry (collector legt Schema evtl. erst spaeter an)."""
+    """Connects to the SQLite DB with retries (the collector may create the schema later)."""
     last_exc = None
     for attempt in range(1, max_attempts + 1):
         try:
             db = await aiosqlite.connect(DB_PATH)
-            # Nur Verbindungs-lokale Pragmas (kein journal_mode/synchronous - die
-            # sind DB-weit bereits vom Collector gesetzt und die DB ist hier :ro
-            # gemountet). busy_timeout verhindert sofortige "database is locked"-
-            # Fehler bei Overlap mit dem staendlichen Kompressions-Job.
+            # Connection-local pragmas only (no journal_mode/synchronous - those
+            # are DB-wide and already set by the collector; this DB is mounted
+            # :ro here). busy_timeout avoids immediate "database is locked"
+            # errors when overlapping with the hourly compression job.
             await db.execute("PRAGMA busy_timeout=5000;")
             await db.execute("PRAGMA cache_size=-32000;")
             await db.execute("PRAGMA temp_store=MEMORY;")
             await db.execute("PRAGMA mmap_size=268435456;")
             if attempt > 1:
-                logger.info("DB-Verbindung erfolgreich nach %s Versuchen.", attempt)
+                logger.info("DB connection succeeded after %s attempts.", attempt)
             return db
         except aiosqlite.OperationalError as exc:
             last_exc = exc
             logger.warning(
-                "DB noch nicht verfuegbar (Versuch %s/%s): %s - warte %ss...",
+                "DB not available yet (attempt %s/%s): %s - retrying in %ss...",
                 attempt, max_attempts, exc, delay_s,
             )
             await asyncio.sleep(delay_s)
     raise RuntimeError(
-        f"Konnte DB nach {max_attempts} Versuchen nicht oeffnen ({DB_PATH})."
+        f"Could not open DB after {max_attempts} attempts ({DB_PATH})."
     ) from last_exc
 
 
@@ -209,7 +206,7 @@ async def _valid_columns(db, table: str) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Generische Lese-Endpunkte
+# Generic read endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
@@ -219,8 +216,8 @@ async def health():
 
 @app.get("/api/columns/{table}")
 async def get_columns(table: str, request: Request, _user: str = Depends(check_auth)):
-    """Spaltenliste einer Tabelle - erlaubt generischen Clients, sich selbst
-    an das Schema anzupassen, ohne dass das Backend dafuer Wissen braucht."""
+    """Column list of a table - lets generic clients adapt to the schema
+    without the backend needing any dashboard-specific knowledge."""
     _require_table(table)
     cols = sorted(await _valid_columns(request.app.state.db, table))
     return {"table": table, "columns": cols, "ts_col": TABLES[table]}
@@ -238,14 +235,14 @@ async def get_raw(
     filter_val: str | None = Query(None),
     _user: str = Depends(check_auth),
 ):
-    """Generische, gefilterte Zeilen-Abfrage einer Tabelle.
+    """Generic filtered row query for a table.
 
-    - from/to: Zeitfenster ueber die Zeitspalte der Tabelle (siehe TABLES).
-    - filter_col/filter_val: optionaler Gleichheitsfilter auf eine beliebige
-      *tatsaechlich existierende* Spalte (z.B. filter_col=type&filter_val=disconnect
-      fuer events). filter_col wird gegen PRAGMA table_info geprueft, bevor er
-      in SQL interpoliert wird - kein Injection-Risiko, da nur echte Spalten-
-      namen der Tabelle akzeptiert werden.
+    - from/to: time window over the table's timestamp column (see TABLES).
+    - filter_col/filter_val: optional equality filter on any column that
+      actually exists (e.g. filter_col=type&filter_val=disconnect for
+      events). filter_col is validated against PRAGMA table_info before
+      being interpolated into SQL - no injection risk, since only real
+      column names of the table are accepted.
     """
     _require_table(table)
     db = request.app.state.db
@@ -275,7 +272,7 @@ async def get_raw(
 
 @app.get("/api/latest/{table}")
 async def get_latest(table: str, request: Request, _user: str = Depends(check_auth)):
-    """Juengste Zeile einer Tabelle (nach Zeitspalte bzw. id fuer Singletons)."""
+    """Most recent row of a table (by timestamp column, or id for singletons)."""
     _require_table(table)
     db = request.app.state.db
     ts_col = TABLES[table]
@@ -286,13 +283,13 @@ async def get_latest(table: str, request: Request, _user: str = Depends(check_au
 
 
 # ---------------------------------------------------------------------------
-# WebSocket live feed - pusht die neueste `metrics`-Zeile roh, unveraendert
+# WebSocket live feed - pushes the newest `metrics` row raw, unmodified
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/live")
 async def ws_live(websocket: WebSocket):
-    # Cookies werden vom Browser beim WS-Handshake automatisch mitgeschickt
-    # (gleiche Origin) - kein manuelles Header-Handling wie frueher bei Basic Auth noetig.
+    # The browser sends cookies automatically on the WS handshake (same
+    # origin) - no manual header handling needed, unlike with Basic Auth.
     username = verify_session_cookie(websocket.cookies.get(COOKIE_NAME))
     if username is None:
         await websocket.close(code=4401)
@@ -310,7 +307,7 @@ async def ws_live(websocket: WebSocket):
 
 
 async def broadcast_loop(app: FastAPI):
-    """Pollt alle 2s den neuesten metrics-Datensatz und pusht ihn roh an alle WS-Clients."""
+    """Polls the newest metrics row every 2s and pushes it raw to all WS clients."""
     last_ts_sent = 0
     while True:
         try:
@@ -337,12 +334,12 @@ async def broadcast_loop(app: FastAPI):
 
 
 # ---------------------------------------------------------------------------
-# Admin API - Datenbereinigung (DELETE, geschuetzt durch Session-Auth)
+# Admin API - data cleanup (DELETE, protected by session auth)
 # ---------------------------------------------------------------------------
 
 class DeleteRequest(pydantic.BaseModel):
-    """Zeitraum fuer DELETE-Operationen. from_ts/to_ts optional (Unix-Timestamps).
-    Wird keins angegeben, werden alle Zeilen der Tabelle geloescht."""
+    """Time range for DELETE operations. from_ts/to_ts are optional (Unix
+    timestamps); if neither is given, all rows in the table are deleted."""
     from_ts: int | None = None
     to_ts: int | None = None
 
@@ -354,13 +351,13 @@ async def delete_table(
     body: DeleteRequest,
     _user: str = Depends(check_auth),
 ):
-    """Loescht Zeilen einer einzelnen Tabelle in einem Zeitraum (oder alle).
-    Fuer zusammenhaengende Loeschungen (z.B. metrics + metrics_minutely
-    gemeinsam leeren) ruft das Frontend diesen Endpunkt mehrfach auf - das
-    ist eine Anzeige-/Bedienlogik-Entscheidung, keine Backend-Aufgabe."""
+    """Deletes rows of a single table within a time range (or all of them).
+    For cascading deletes (e.g. clearing metrics + metrics_minutely
+    together), the frontend calls this endpoint multiple times - that's a
+    UI decision, not a backend concern."""
     _require_table(table)
     if table == "dish_info":
-        raise HTTPException(status_code=400, detail="dish_info kann nicht per Zeitraum geloescht werden.")
+        raise HTTPException(status_code=400, detail="dish_info cannot be deleted by time range.")
     db = request.app.state.db
     ts_col = TABLES[table]
     clauses, params = [], []
@@ -381,11 +378,10 @@ async def delete_table(
 
 @app.get("/api/config")
 async def public_config():
-    """Oeffentlich (kein Auth) - liefert reine UI-Hinweise, keine Secrets.
-    login.js nutzt das, um z.B. zu erkennen, wenn COOKIE_SECURE=true gesetzt
-    ist, die Seite aber ueber HTTP statt HTTPS aufgerufen wird - sonst wird
-    das Session-Cookie vom Browser still verworfen und der Login schlaegt
-    ohne sichtbare Fehlermeldung fehl (Cookie-Set klappt, nur Speichern nicht)."""
+    """Public (no auth) - UI hints only, no secrets. login.js uses this to
+    detect e.g. COOKIE_SECURE=true while the page is loaded over plain HTTP,
+    which would otherwise make the browser silently drop the session cookie
+    and login fail with no visible error."""
     return {"cookie_secure": COOKIE_SECURE, "totp_required": bool(TOTP_SECRET)}
 
 
@@ -404,20 +400,20 @@ async def login_page():
 async def login(body: LoginRequest, request: Request):
     ip = _client_ip(request)
     if _rate_limited(ip):
-        raise HTTPException(status_code=429, detail="Zu viele Fehlversuche. Bitte kurz warten.")
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Please wait a moment.")
 
     correct_user = secrets.compare_digest(body.username, ADMIN_USER)
     correct_pass = secrets.compare_digest(body.password, ADMIN_PASS)
     if not (correct_user and correct_pass):
         _record_failed_attempt(ip)
-        raise HTTPException(status_code=401, detail="Benutzername oder Passwort falsch.")
+        raise HTTPException(status_code=401, detail="Incorrect username or password.")
 
     if TOTP_SECRET:
         if not body.totp_code:
-            raise HTTPException(status_code=400, detail="2FA-Code erforderlich.")
+            raise HTTPException(status_code=400, detail="2FA code required.")
         if not pyotp.TOTP(TOTP_SECRET).verify(body.totp_code.strip(), valid_window=1):
             _record_failed_attempt(ip)
-            raise HTTPException(status_code=401, detail="2FA-Code ungueltig.")
+            raise HTTPException(status_code=401, detail="Invalid 2FA code.")
 
     response = JSONResponse({"status": "ok"})
     response.set_cookie(
@@ -441,8 +437,8 @@ async def logout():
 
 @app.get("/logout")
 async def logout_redirect():
-    """Bequemer Direktaufruf per Browser-URL (z.B. Lesezeichen), ohne dass
-    JS eine POST-Anfrage bauen muss."""
+    """Convenient direct browser navigation (e.g. a bookmark), without JS
+    having to build a POST request."""
     response = RedirectResponse(url="/login")
     response.delete_cookie(COOKIE_NAME, path="/")
     return response

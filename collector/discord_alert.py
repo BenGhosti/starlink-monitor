@@ -1,15 +1,13 @@
 """
 discord_alert.py
-Helper fuer Discord-Embed-Webhooks mit persistenter Retry-Queue.
+Helper for Discord embed webhooks with a persistent retry queue.
 
-Warum eine Queue: faellt das Internet selbst aus (nicht nur die Starlink-
-Verbindung, sondern z.B. der Heimrouter/das Modem dahinter, oder Discord ist
-kurz nicht erreichbar), schlaegt der Webhook-POST fehl. Ohne Queue ist der
-Alert dann einfach verloren - inklusive der Information "Verbindung ist
-gerade ausgefallen", die ja eigentlich der Punkt des Alerts war. Stattdessen
-landet ein fehlgeschlagener Alert in `alert_queue` (SQLite, ueberlebt auch
-einen Container-Neustart) und ein Hintergrund-Task versucht ihn periodisch
-erneut zu senden, bis es klappt.
+Why a queue: if the internet itself goes down (not just the Starlink link,
+but the home router/modem behind it, or Discord is briefly unreachable), the
+webhook POST fails. Without a queue that alert - including the "connection
+just went down" information it was meant to carry - is simply lost. Instead,
+a failed alert lands in `alert_queue` (SQLite, survives a container
+restart) and a background task keeps retrying it until it succeeds.
 """
 
 import asyncio
@@ -29,8 +27,8 @@ COLOR_YELLOW = 0xFFB300
 COLOR_GREEN = 0x00FF88
 
 RETRY_INTERVAL_S = 30
-MAX_QUEUE_AGE_S = 24 * 3600  # Alerts aelter als 1 Tag sind nicht mehr relevant, verwerfen
-MAX_ATTEMPTS = 200  # ~200 * 30s ≈ 100 Minuten Dauerversuch, danach als Spam-Schutz aufgeben
+MAX_QUEUE_AGE_S = 24 * 3600  # alerts older than 1 day are no longer relevant, drop them
+MAX_ATTEMPTS = 200  # ~200 * 30s ~= 100 minutes of retrying before giving up
 
 
 def _now_iso() -> str:
@@ -52,31 +50,30 @@ def _build_payload(title: str, description: str, color: int, fields: dict | None
 
 
 async def _post_to_discord(payload: dict) -> bool:
-    """Sendet einen fertigen Payload an Discord. True bei Erfolg, False bei Fehler."""
+    """Sends a finished payload to Discord. True on success, False on failure."""
     if not WEBHOOK_URL:
-        logger.warning("DISCORD_WEBHOOK nicht gesetzt, Alert wird verworfen.")
-        return True  # kein Retry sinnvoll, wenn ueberhaupt keine URL konfiguriert ist
+        logger.warning("DISCORD_WEBHOOK not set, dropping alert.")
+        return True  # no point retrying if there's no URL configured at all
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(WEBHOOK_URL, json=payload, timeout=10) as resp:
                 if resp.status >= 300:
                     body = await resp.text()
-                    logger.error("Discord-Webhook fehlgeschlagen (%s): %s", resp.status, body)
+                    logger.error("Discord webhook failed (%s): %s", resp.status, body)
                     return False
                 return True
-    except Exception as exc:  # noqa: BLE001 - Netzwerkfehler sind hier der Normalfall, nicht die Ausnahme
-        logger.warning("Discord-Webhook nicht erreichbar (wird erneut versucht): %s", exc)
+    except Exception as exc:  # noqa: BLE001 - network errors are the expected case here, not the exception
+        logger.warning("Discord webhook unreachable (will retry): %s", exc)
         return False
 
 
 async def send_alert(title: str, description: str, color: int = COLOR_RED, fields: dict | None = None, db=None):
-    """Sendet eine Embed-Nachricht an den Discord-Webhook.
+    """Sends an embed message to the Discord webhook.
 
-    Schlaegt der direkte Versand fehl UND ist eine db-Connection uebergeben,
-    wird der Alert in `alert_queue` zwischengespeichert statt verworfen.
-    Ohne db-Parameter (Abwaertskompatibilitaet) wird bei Fehlschlag nur
-    geloggt, wie bisher.
+    If the direct send fails AND a db connection was passed, the alert is
+    queued in `alert_queue` instead of being dropped. Without db (backwards
+    compatible), a failure is just logged as before.
     """
     payload = _build_payload(title, description, color, fields)
     success = await _post_to_discord(payload)
@@ -93,22 +90,19 @@ async def _enqueue(db, payload: dict):
         (now, json.dumps(payload, ensure_ascii=False), now),
     )
     await db.commit()
-    logger.info("Alert in Retry-Queue eingereiht (Discord aktuell nicht erreichbar).")
+    logger.info("Alert queued for retry (Discord currently unreachable).")
 
 
 async def retry_queue_loop(db):
-    """Hintergrund-Task: versucht periodisch, in der Queue wartende Alerts zu versenden.
-
-    Wird als eigener asyncio-Task aus collect.py gestartet, parallel zu den
-    anderen Collector-Tasks (metrics_collector, ping_watchdog, etc.) - siehe
-    dortige Task-Liste.
-    """
-    logger.info("Discord-Retry-Queue-Loop startet, Intervall %ss", RETRY_INTERVAL_S)
+    """Background task that periodically retries alerts waiting in the queue.
+    Started as its own asyncio task from collect.py, alongside the other
+    collector tasks (metrics_collector, ping_watchdog, etc.)."""
+    logger.info("Discord retry-queue loop starting, interval %ss", RETRY_INTERVAL_S)
     while True:
         try:
             await _process_queue_once(db)
         except Exception:  # noqa: BLE001
-            logger.exception("Fehler im Discord-Retry-Queue-Loop")
+            logger.exception("Error in Discord retry-queue loop")
         await asyncio.sleep(RETRY_INTERVAL_S)
 
 
@@ -116,8 +110,8 @@ async def _process_queue_once(db):
     import time
     now = int(time.time())
 
-    # Veraltete Alerts (z.B. ein Disconnect-Alert von vor 2 Tagen) sind nicht
-    # mehr relevant zum Nachsenden - aufraeumen statt ewig zu versuchen.
+    # Stale alerts (e.g. a disconnect alert from 2 days ago) are no longer
+    # worth resending - clean them up instead of retrying forever.
     await db.execute("DELETE FROM alert_queue WHERE created_ts < ?", (now - MAX_QUEUE_AGE_S,))
     await db.execute("DELETE FROM alert_queue WHERE attempts >= ?", (MAX_ATTEMPTS,))
     await db.commit()
@@ -130,7 +124,7 @@ async def _process_queue_once(db):
     if not rows:
         return
 
-    logger.info("Discord-Retry-Queue: %s wartende Alert(s), versuche Versand...", len(rows))
+    logger.info("Discord retry queue: %s pending alert(s), attempting delivery...", len(rows))
 
     for row in rows:
         queue_id, payload_json, attempts = row[0], row[1], row[2]
@@ -140,14 +134,14 @@ async def _process_queue_once(db):
         if success:
             await db.execute("DELETE FROM alert_queue WHERE id = ?", (queue_id,))
             await db.commit()
-            logger.info("Alert aus Queue %s erfolgreich nachgesendet.", queue_id)
+            logger.info("Alert %s resent successfully from the queue.", queue_id)
         else:
             await db.execute(
                 "UPDATE alert_queue SET attempts = ?, last_attempt_ts = ? WHERE id = ?",
                 (attempts + 1, now, queue_id),
             )
             await db.commit()
-            # Discord vermutlich/Internet noch nicht zurueck - restliche Queue
-            # auch nicht weiter versuchen in diesem Durchlauf, naechster Loop
-            # in RETRY_INTERVAL_S Sekunden reicht.
+            # Discord/internet is probably still down - don't keep trying
+            # the rest of the queue this pass, the next loop in
+            # RETRY_INTERVAL_S seconds is enough.
             break

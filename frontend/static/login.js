@@ -9,10 +9,10 @@ function showError(msg) {
   errorBox.style.display = 'block';
 }
 
-// Self-Check beim Laden: erkennt die haeufigste stille Fehlerursache (Server
-// verlangt Secure-Cookies, Seite laeuft aber ueber HTTP -> Browser verwirft
-// das Cookie kommentarlos, Login-Response ist 200, aber die Session existiert
-// nie). Ohne diesen Hinweis sieht das aus wie "Login tut einfach nichts".
+// Self-check on load: catches the most common silent failure (server
+// requires Secure cookies but the page loaded over plain HTTP, so the
+// browser drops the cookie without saying so - login returns 200 but
+// no session ever exists).
 (async () => {
   try {
     const res = await fetch('/api/config', { credentials: 'include' });
@@ -21,10 +21,10 @@ function showError(msg) {
 
     if (cfg.cookie_secure && window.location.protocol !== 'https:') {
       showError(
-        'Achtung: Der Server verlangt sichere Cookies (COOKIE_SECURE=true), ' +
-        'diese Seite läuft aber über HTTP. Der Login wird fehlschlagen, ohne ' +
-        'dass eine Fehlermeldung erscheint. Entweder über HTTPS aufrufen ' +
-        'oder COOKIE_SECURE=false in der .env setzen und den Container neu starten.'
+        'Warning: the server requires secure cookies (COOKIE_SECURE=true), ' +
+        'but this page is loaded over plain HTTP. Login will fail silently. ' +
+        'Either access it over HTTPS, or set COOKIE_SECURE=false in .env ' +
+        'and restart the container.'
       );
     }
 
@@ -34,7 +34,7 @@ function showError(msg) {
       totpInput.setAttribute('required', 'required');
     }
   } catch (_err) {
-    // /api/config nicht erreichbar - kein Blocker, Login-Formular bleibt normal nutzbar
+    // /api/config unreachable - not a blocker, form stays usable normally
   }
 })();
 
@@ -42,7 +42,7 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   errorBox.style.display = 'none';
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Anmelden...';
+  submitBtn.textContent = 'Signing in...';
 
   const username = document.getElementById('loginUser').value;
   const password = document.getElementById('loginPass').value;
@@ -63,18 +63,18 @@ form.addEventListener('submit', async (e) => {
     }
 
     if (res.status === 400) {
-      // Passwort war korrekt, es fehlt nur noch der 2FA-Code
-      showError('Bitte 2FA-Code aus der Authenticator-App eingeben.');
+      // Password was correct, just missing the 2FA code
+      showError('Please enter the 2FA code from your authenticator app.');
       totpInput.focus();
     } else if (res.status === 429) {
-      showError('Zu viele Fehlversuche. Bitte kurz warten und erneut versuchen.');
+      showError('Too many failed attempts. Please wait a moment and try again.');
     } else {
-      showError('Benutzername, Passwort oder 2FA-Code falsch.');
+      showError('Username, password, or 2FA code is incorrect.');
     }
   } catch (_err) {
-    showError('Server nicht erreichbar. Bitte erneut versuchen.');
+    showError('Server unreachable. Please try again.');
   } finally {
     submitBtn.disabled = false;
-    submitBtn.textContent = 'Anmelden';
+    submitBtn.textContent = 'Sign In';
   }
 });

@@ -1,8 +1,8 @@
 """
 weather_poller.py
-Pollt Open-Meteo (kostenlos, kein Key) fuer Krefeld alle 10 Minuten.
-Schreibt in Tabelle `weather` und sendet bei aktiver Unwetterwarnung
-(Gewitter, Sturm Bft 7+) einen Discord-Alert.
+Polls Open-Meteo (free, no API key) for the configured location every 10
+minutes. Writes to the `weather` table and sends a Discord alert on an
+active severe-weather warning (thunderstorm, storm-force wind).
 """
 
 import asyncio
@@ -17,6 +17,7 @@ from weather_state import set_last_weather
 
 logger = logging.getLogger("weather_poller")
 
+# Defaults to Krefeld, Germany - change to your own location if you fork this.
 LAT = 51.3388
 LON = 6.5853
 POLL_INTERVAL_S = 10 * 60
@@ -28,30 +29,30 @@ OPEN_METEO_URL = (
     "&timezone=Europe%2FBerlin"
 )
 
-# WMO-Codes die wir als "Unwetter" werten (Gewitter, starker Schneefall/Hagel etc.)
+# WMO codes treated as "severe weather" (thunderstorms, heavy snow/hail, etc.)
 THUNDERSTORM_CODES = {95, 96, 99}
 HEAVY_SNOW_CODES = {75, 86}
-WIND_WARNING_KMH = 50  # entspricht etwa Bft 7 (Sturm)
+WIND_WARNING_KMH = 50  # roughly Beaufort 7 (storm)
 
 WMO_DESCRIPTIONS = {
-    0: "Klar", 1: "Ueberwiegend klar", 2: "Teilweise bewoelkt", 3: "Bedeckt",
-    45: "Nebel", 48: "Reifnebel",
-    51: "Leichter Niesel", 53: "Niesel", 55: "Starker Niesel",
-    61: "Leichter Regen", 63: "Regen", 65: "Starker Regen",
-    71: "Leichter Schneefall", 73: "Schneefall", 75: "Starker Schneefall",
-    77: "Schneegriesel", 80: "Regenschauer", 81: "Regenschauer", 82: "Heftige Regenschauer",
-    85: "Schneeschauer", 86: "Starke Schneeschauer",
-    95: "Gewitter", 96: "Gewitter mit Hagel", 99: "Schweres Gewitter mit Hagel",
+    0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
+    45: "Fog", 48: "Rime fog",
+    51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
+    61: "Light rain", 63: "Rain", 65: "Heavy rain",
+    71: "Light snow", 73: "Snow", 75: "Heavy snow",
+    77: "Snow grains", 80: "Rain showers", 81: "Rain showers", 82: "Violent rain showers",
+    85: "Snow showers", 86: "Heavy snow showers",
+    95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Severe thunderstorm with hail",
 }
 
 
 def evaluate_warning(wmo_code: int, wind_kmh: float) -> str | None:
     if wmo_code in THUNDERSTORM_CODES:
-        return f"Gewitter ({WMO_DESCRIPTIONS.get(wmo_code, 'Unwetter')})"
+        return f"Thunderstorm ({WMO_DESCRIPTIONS.get(wmo_code, 'severe weather')})"
     if wmo_code in HEAVY_SNOW_CODES:
-        return f"Starker Schneefall ({WMO_DESCRIPTIONS.get(wmo_code, 'Unwetter')})"
+        return f"Heavy snow ({WMO_DESCRIPTIONS.get(wmo_code, 'severe weather')})"
     if wind_kmh >= WIND_WARNING_KMH:
-        return f"Sturmwarnung (Wind {wind_kmh:.0f} km/h)"
+        return f"Storm warning (wind {wind_kmh:.0f} km/h)"
     return None
 
 
@@ -73,7 +74,7 @@ async def fetch_weather() -> dict | None:
                     "humidity": current.get("relative_humidity_2m"),
                 }
     except Exception:  # noqa: BLE001
-        logger.exception("Fehler beim Abruf der Open-Meteo API")
+        logger.exception("Error fetching the Open-Meteo API")
         return None
 
 
@@ -99,7 +100,7 @@ async def insert_weather(db, row: dict, warning: str | None):
 
 
 async def run():
-    logger.info("weather_poller startet fuer Krefeld (%s, %s), Intervall %ss", LAT, LON, POLL_INTERVAL_S)
+    logger.info("weather_poller starting for (%s, %s), interval %ss", LAT, LON, POLL_INTERVAL_S)
     db = await get_db()
 
     last_warning_sent: str | None = None
@@ -115,14 +116,14 @@ async def run():
                 await insert_weather(db, row, warning)
                 set_last_weather(row["temp_c"], row["wind_kmh"], row["wmo_code"], warning)
 
-                # Nur bei neuer/wechselnder Warnung alarmieren, nicht jede 10 Minuten erneut
+                # Only alert on a new/changed warning, not every 10 minutes
                 if warning and warning != last_warning_sent:
                     await send_alert(
-                        title="⚡ Unwetterwarnung",
+                        title="⚡ Severe Weather Warning",
                         description=warning,
                         color=COLOR_YELLOW,
                         fields={
-                            "Temperatur": f"{row['temp_c']}°C" if row["temp_c"] is not None else "n/a",
+                            "Temperature": f"{row['temp_c']}°C" if row["temp_c"] is not None else "n/a",
                             "Wind": f"{row['wind_kmh']} km/h" if row["wind_kmh"] is not None else "n/a",
                         },
                         db=db,

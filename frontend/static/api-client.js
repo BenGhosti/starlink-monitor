@@ -1,26 +1,20 @@
-/* api-client.js — Daten-Layer zwischen generischem Backend und dashboard.js
- *
- * Das Backend (api.py) liefert nur noch rohe, gefilterte Tabellenzeilen
- * (/api/raw/{table}, /api/latest/{table}). JEDE Anzeige-/Aufbereitungslogik
- * (Range->Aufloesung, Bucket-Aggregation, Stats-Berechnung, CSV-Bau) lebt
- * hier. Wer nur das Frontend aendern will (neue Charts, andere Kennzahlen,
- * anderes CSV-Format), aendert NUR diese Datei bzw. dashboard.js — niemals
- * api.py. Siehe BACKEND_GUIDE.md fuer die Backend-Vertragsseite.
+/* api-client.js - data layer between the generic backend and dashboard.js.
+ * The backend (api.py) only serves raw, filtered table rows. All display/
+ * aggregation logic (range->resolution, bucketing, stats, CSV) lives here.
+ * See BACKEND_GUIDE.md for the backend's side of the contract.
  */
 
 const MAX_LIMIT = 50000;
 
-// Kernidee: JEDER Zeitraum bekommt dieselbe Ziel-Punktanzahl im Chart -
-// die Aufloesung (Sekunden pro Punkt) wird dynamisch aus der Zeitspanne
-// abgeleitet (span / TARGET_POINTS), nicht mehr pro Range hart codiert.
-// Dadurch bleiben Charts bei jedem Zeitraum gleich "dicht" und die Einheiten
-// (Sekunden/Minuten/Stunden/Tage) skalieren automatisch mit der Spanne.
+// Every range targets the same point count; resolution (seconds/point) is
+// derived dynamically from the span (span / TARGET_POINTS) instead of being
+// hardcoded per range.
 const TARGET_POINTS = 300;
-const RAW_METRICS_INTERVAL_S = 2;      // Collector-Polling-Takt (metrics_collector.py)
-const RAW_SPEEDTEST_INTERVAL_S = 8 * 3600; // speedtest_runner.py Intervall
+const RAW_METRICS_INTERVAL_S = 2;      // collector poll interval (metrics_collector.py)
+const RAW_SPEEDTEST_INTERVAL_S = 8 * 3600; // speedtest_runner.py interval
 
-// Zeitraum -> Dauer in Sekunden (null = "all", Dauer wird dynamisch aus den
-// aeltesten vorhandenen Daten ermittelt).
+// Range key -> duration in seconds (null = "all", resolved dynamically
+// from the oldest available data).
 const RANGE_SECONDS = {
   '1d': 24 * 3600,
   '7d': 7 * 24 * 3600,
@@ -32,7 +26,7 @@ const RANGE_SECONDS = {
   all: null,
 };
 
-let _earliestTsCache = null; // pro Seiten-Ladung einmal ermitteln, spart Requests
+let _earliestTsCache = null; // resolved once per page load
 
 async function getEarliestMetricsTs() {
   if (_earliestTsCache != null) return _earliestTsCache;
@@ -47,11 +41,9 @@ async function getEarliestMetricsTs() {
   return _earliestTsCache;
 }
 
-// Liefert [from, to, resolution_s] fuer einen Range-Key oder ein explizites
-// Zeitfenster. resolution_s = Sekunden pro Chart-Punkt, so berechnet, dass
-// ueber die gesamte Spanne immer ~TARGET_POINTS Punkte herauskommen (nach
-// unten begrenzt durch minResolution, damit kurze Zeitraeume nicht feiner
-// aufgeloest werden, als Rohdaten ueberhaupt existieren).
+// Returns [from, to, resolution_s] for a range key or explicit window.
+// resolution_s targets ~TARGET_POINTS across the span, floored by
+// minResolution so short ranges aren't resolved finer than raw data exists.
 async function resolveRange(rangeKey, fromTs = null, toTs = null, minResolution = RAW_METRICS_INTERVAL_S) {
   const now = Math.floor(Date.now() / 1000);
   let from, to;
@@ -67,9 +59,7 @@ async function resolveRange(rangeKey, fromTs = null, toTs = null, minResolution 
   return [from, to, resolution_s];
 }
 
-// Waehlt eine zur tatsaechlichen Zeitspanne passende Chart.js-Zeitachsen-
-// Einheit (Minute/Stunde/Tag/Monat/Jahr) - Einheiten skalieren also mit dem
-// ausgewaehlten Zeitraum statt pro Range-Taste hart codiert zu sein.
+// Picks a Chart.js time-axis unit that fits the actual span.
 function pickTimeAxisUnit(fromTs, toTs) {
   const span = Math.max(1, toTs - fromTs);
   const HOUR = 3600, DAY = 86400, MONTH = 30 * DAY, YEAR = 365 * DAY;
@@ -81,13 +71,10 @@ function pickTimeAxisUnit(fromTs, toTs) {
 }
 
 // ---------------------------------------------------------------------------
-// Generische Backend-Zugriffe
+// Generic backend access
 // ---------------------------------------------------------------------------
 
-// Session-Cookie (siehe api.py) ist serverseitig HttpOnly - laeuft sie waehrend
-// eine Dashboard-Seite offen ist ab, antwortet jeder Endpunkt mit 401. Statt
-// dass jeder Aufrufer das einzeln behandelt, leitet dieser eine Helfer direkt
-// zur Login-Seite um.
+// Session cookie is HttpOnly (see api.py); redirect centrally on 401 instead of per call-site.
 function _redirectToLoginOn401(res) {
   if (res.status === 401) {
     window.location.href = '/login';
@@ -101,13 +88,13 @@ async function apiRaw(table, params = {}) {
     if (v !== undefined && v !== null) qs.set(k, v);
   }
   const res = _redirectToLoginOn401(await fetch(`/api/raw/${table}?${qs.toString()}`, { credentials: 'include' }));
-  if (!res.ok) throw new Error(`HTTP ${res.status} bei /api/raw/${table}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} on /api/raw/${table}`);
   return res.json();
 }
 
 async function apiLatest(table) {
   const res = _redirectToLoginOn401(await fetch(`/api/latest/${table}`, { credentials: 'include' }));
-  if (!res.ok) throw new Error(`HTTP ${res.status} bei /api/latest/${table}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} on /api/latest/${table}`);
   return res.json();
 }
 
@@ -125,43 +112,37 @@ async function apiDeleteTable(table, from_ts, to_ts) {
   return res.json();
 }
 
-// Name der Zeitspalte je Tabelle (muss zur TABLES-Allowlist in api.py passen) -
-// wird fuer die Cursor-Paginierung unten gebraucht.
+// Timestamp column per table (must match the TABLES allowlist in api.py), used for cursor pagination below.
 const TS_FIELDS = {
   metrics: 'ts', metrics_minutely: 'ts_minute', metrics_hourly: 'ts_hour', metrics_daily: 'ts_day',
   events: 'ts', speedtests: 'ts', weather: 'ts',
 };
 
-// Holt ALLE Zeilen in [from, to], unabhaengig vom serverseitigen Limit pro
-// Request (MAX_LIMIT in api.py, aktuell 50000). Ohne das wuerden lange
-// Zeitraeume bei dicht befuellten Tabellen (v.a. metrics_minutely: bis zu
-// 1 Zeile/Minute ueber bis zu 2 Jahre Retention, siehe cleanup.py) beim
-// einfachen Einzel-Request stillschweigend nur den AELTESTEN Teil des
-// Fensters liefern (order=asc + harte Obergrenze) - der Chart wuerde dann
-// bei 6m/12m/all falsche, unvollstaendige Daten zeigen, ohne dass irgendwo
-// ein Fehler auftaucht. Paginiert daher per Zeitstempel-Cursor weiter, bis
-// eine Seite kleiner als das Limit zurueckkommt.
+// Fetches ALL rows in [from, to] regardless of the per-request server limit
+// (MAX_LIMIT in api.py). Without pagination, long ranges on dense tables
+// would silently only return the oldest slice of the window. Pages forward
+// by timestamp cursor until a page comes back shorter than the limit.
 async function fetchAllRaw(table, { from, to, filter_col, filter_val } = {}) {
   const tsField = TS_FIELDS[table];
   let out = [];
   let cursor = from;
-  for (let page = 0; page < 500; page++) { // Sicherheitsobergrenze gegen Endlosschleifen
+  for (let page = 0; page < 500; page++) { // safety cap against infinite loops
     const params = { from: cursor, to, limit: MAX_LIMIT, order: 'asc' };
     if (filter_col) { params.filter_col = filter_col; params.filter_val = filter_val; }
     const rows = (await apiRaw(table, params)).data;
     if (!rows.length) break;
     out = out.concat(rows);
-    if (rows.length < MAX_LIMIT) break; // letzte Seite erreicht
+    if (rows.length < MAX_LIMIT) break; // last page reached
     const lastTs = rows[rows.length - 1][tsField];
     if (lastTs == null || (to != null && lastTs >= to)) break;
-    cursor = lastTs + 1; // naechste Seite direkt hinter der zuletzt gesehenen Zeile fortsetzen
+    cursor = lastTs + 1; // continue right after the last row seen
   }
   return out;
 }
 
 // ---------------------------------------------------------------------------
-// Metriken: Range -> Aufloesung -> ggf. Bucket-Aggregation (frueher SQL im
-// Backend, jetzt hier). Rueckgabeform bleibt kompatibel zu vorher:
+// Metrics: range -> resolution -> bucket aggregation (client-side, was SQL
+// in the backend before). Returns:
 // { from, to, resolution_s, data: [{ts, ping_drop_rate, ping_latency_ms, ...}] }
 // ---------------------------------------------------------------------------
 function avgOf(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null; }
@@ -191,11 +172,9 @@ async function fetchMetrics(range) {
       min_uplink: r.min_uplink_bps, max_uplink: r.max_uplink_bps,
     }));
   } else {
-    // Minutely zu groesseren Buckets zusammenfassen; fuer Zeitraum vor der
-    // aeltesten vorhandenen Minutely-Zeile auf metrics_hourly zurueckfallen,
-    // und fuer Zeitraum vor der aeltesten metrics_hourly-Zeile (Rollup nach
-    // HOURLY_ROLLUP_DAYS, siehe cleanup.py) weiter auf metrics_daily -
-    // gleiche Kaskaden-Logik wie zuvor im Backend-SQL, nur clientseitig in JS.
+    // Bucket minutely rows into wider buckets; fall back to metrics_hourly
+    // before the oldest minutely row, then metrics_daily before the oldest
+    // hourly row (see HOURLY_ROLLUP_DAYS in cleanup.py).
     const minuteRows = await fetchAllRaw('metrics_minutely', { from, to });
     const oldestMinute = (await apiRaw('metrics_minutely', { limit: 1, order: 'asc' })).data[0];
     const oldestMinuteTs = oldestMinute ? oldestMinute.ts_minute : Infinity;
@@ -272,13 +251,11 @@ async function fetchMetrics(range) {
 }
 
 // ---------------------------------------------------------------------------
-// Traffic (Datenvolumen Down/Up in GB) - nutzt dieselbe Tabellen-Kaskade wie
-// fetchMetrics(), summiert aber Bytes statt Werte zu mitteln. Fuer die
-// Rohdaten-Tabelle (nur bei range='1d' genutzt) werden die Bytes pro Zeile
-// aus bps * RAW_METRICS_INTERVAL_S / 8 berechnet; ab metrics_minutely liegen
-// down_bytes/up_bytes bereits fertig im Schema (siehe collector/db.py).
-// Bucket-Breite ist bewusst grober als bei den 300-Punkte-Liniencharts, damit
-// die Balken lesbar bleiben (stuendlich/taeglich/woechentlich/monatlich).
+// Traffic (down/up data volume in GB) - same table cascade as fetchMetrics(),
+// but sums bytes instead of averaging. Raw table (range='1d' only) computes
+// bytes per row as bps * RAW_METRICS_INTERVAL_S / 8; from metrics_minutely
+// up, down_bytes/up_bytes are already in the schema (see collector/db.py).
+// Bucket width is coarser than the line charts' TARGET_POINTS for readability.
 const TRAFFIC_BUCKET_S = {
   '1d': 3600, '7d': 86400, '14d': 86400, '1m': 86400,
   '6m': 7 * 86400, '12m': 30 * 86400,
@@ -308,8 +285,7 @@ async function fetchTraffic(range) {
       );
     }
   } else {
-    // Gleiche Kaskade wie fetchMetrics(): minutely -> hourly -> daily,
-    // je nachdem wie weit `from` in die Vergangenheit reicht.
+    // Same cascade as fetchMetrics(): minutely -> hourly -> daily.
     const oldestMinute = (await apiRaw('metrics_minutely', { limit: 1, order: 'asc' })).data[0];
     const oldestMinuteTs = oldestMinute ? oldestMinute.ts_minute : Infinity;
     const oldestHour = (await apiRaw('metrics_hourly', { limit: 1, order: 'asc' })).data[0];
@@ -356,16 +332,13 @@ async function fetchEvents(range = '7d', type = null) {
     filter_col: type ? 'type' : undefined,
     filter_val: type ? type : undefined,
   });
-  rows.sort((a, b) => b.ts - a.ts); // neueste zuerst (fetchAllRaw liefert intern aufsteigend)
+  rows.sort((a, b) => b.ts - a.ts); // newest first (fetchAllRaw returns ascending)
   return rows;
 }
 
 // ---------------------------------------------------------------------------
-// Speedtests: gleiche Ziel-Punktanzahl-Logik wie bei Metriken. Bucket-Breite
-// = resolveRange()-Ergebnis, aber nie feiner als das Speedtest-Intervall
-// selbst (8h) - bei kurzen Zeitraeumen kommen so einfach die Rohwerte durch,
-// bei langen wird zu gleich breiten Zeit-Buckets gemittelt (frueher fix auf
-// Kalendertage, jetzt an TARGET_POINTS gekoppelt).
+// Speedtests: same target-point-count logic as metrics. Bucket width comes
+// from resolveRange(), floored at the speedtest interval itself (8h).
 // ---------------------------------------------------------------------------
 async function fetchSpeedtests(range = 'all') {
   const [from, to, resolution_s] = await resolveRange(range, null, null, RAW_SPEEDTEST_INTERVAL_S);
@@ -404,7 +377,7 @@ async function fetchSpeedtests(range = 'all') {
 }
 
 // ---------------------------------------------------------------------------
-// Dish-Status, Wetter, Stats-Summary
+// Dish status, weather, stats summary
 // ---------------------------------------------------------------------------
 async function fetchDishStatus() {
   const [latest, info] = await Promise.all([apiLatest('metrics'), apiLatest('dish_info')]);
@@ -455,7 +428,7 @@ async function fetchStatsSummary() {
 }
 
 // ---------------------------------------------------------------------------
-// CSV-Export (frueher StreamingResponse im Backend, jetzt Blob im Browser)
+// CSV export (client-side Blob, was a backend StreamingResponse before)
 // ---------------------------------------------------------------------------
 function csvEscape(v) {
   if (v === null || v === undefined) return '';
@@ -495,21 +468,20 @@ async function downloadCsv(range) {
 }
 
 // ---------------------------------------------------------------------------
-// Peak-Werte (beste je gemessene Latenz, hoechster Down-/Upload) - stammen
-// aus den 2-sekuendlichen Live-Abtastungen (metrics-Tabelle). fetchMetrics()
-// liefert pro Bucket bereits min_latency/max_downlink/max_uplink, die bei
-// Rohdaten-Aufloesung (kurze Zeitraeume) exakt der 2s-Abtastung entsprechen
-// und bei laengeren Zeitraeumen aus den waehrend der Aggregation von den
-// 2s-Werten abgeleiteten min/max-Spalten der Minutely-/Hourly-Tabellen
-// stammen - wir muessen dafuer also keine komplette Rohdaten-Historie erneut
-// laden, sondern nehmen einfach das Extremum ueber alle Buckets.
+// Peak values (best latency, highest down/upload) from the 2s live samples.
+// fetchMetrics() already returns min_latency/max_downlink/max_uplink per
+// bucket, so we just take the extremum across buckets instead of re-loading
+// the full raw history.
 // ---------------------------------------------------------------------------
 async function fetchPeakStats(range) {
   const json = await fetchMetrics(range);
   let bestLatencyMs = null, peakDownloadBps = null, peakUploadBps = null;
   for (const d of json.data) {
+    // Starlink reports -1 (or other <=0 values) as a "no data" sentinel for
+    // latency, not a real measurement - exclude those or "best latency"
+    // ends up showing an impossible negative number.
     const lat = d.min_latency ?? d.ping_latency_ms;
-    if (lat != null && (bestLatencyMs == null || lat < bestLatencyMs)) bestLatencyMs = lat;
+    if (lat != null && lat > 0 && (bestLatencyMs == null || lat < bestLatencyMs)) bestLatencyMs = lat;
     const down = d.max_downlink ?? d.downlink_bps;
     if (down != null && (peakDownloadBps == null || down > peakDownloadBps)) peakDownloadBps = down;
     const up = d.max_uplink ?? d.uplink_bps;
@@ -524,8 +496,7 @@ async function fetchPeakStats(range) {
 }
 
 // ---------------------------------------------------------------------------
-// Admin-Delete (Kaskadier-Entscheidung "metrics + metrics_minutely zusammen
-// leeren" ist Bedienlogik und lebt daher hier, nicht im Backend)
+// Admin delete (the metrics+metrics_minutely cascade is UI logic, so it lives here, not in the backend)
 // ---------------------------------------------------------------------------
 async function adminDelete(target, from_ts, to_ts) {
   if (target === 'metrics') {

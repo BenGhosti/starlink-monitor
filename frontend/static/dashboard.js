@@ -1,29 +1,10 @@
-/* dashboard.js — Starlink Monitor Frontend
- * Eigenstaendige Neuimplementierung (siehe Backend-API-Guide).
- *
- * Bekannte Fehler der Vorversion, die hier behoben wurden:
- * 1. Admin-Delete zeigte nach "Ping/Latenz-Daten loeschen" immer "0 Zeilen
- *    geloescht", weil /api/admin/metrics {deleted_raw, deleted_minutely}
- *    zurueckgibt statt {deleted}. Der Client las nur data.deleted.
- * 2. Sky-View-Dome: Canvas wurde mit fester Pixelgroesse *vor* korrektem
- *    Reflow initialisiert und ohne devicePixelRatio-Reset bei Resize neu
- *    gezeichnet - dadurch blieb der Dome auf manchen Bildschirmen winzig
- *    und ohne sichtbare Ringe/Speichen (nur Nadel + Label sichtbar).
- * 3. Geraete-Alarme-Panel blieb dauerhaft auf "Lade Alarme..." haengen -
- *    es gab schlicht keinen Code, der alerts_bitfield auswertet und
- *    Chips rendert, obwohl /api/dish/status das Feld liefert.
- * 4. Kompass-Nadel und Dome nutzten unterschiedliche Winkel-Konventionen
- *    (0deg=oben vs. 0deg=Ost-Offset per (az-90)) - hier vereinheitlicht:
- *    0 deg = Nord = oben, im Uhrzeigersinn, ueberall gleich.
- * 5. Footer nutzte /api/metrics?range=all fuer die Datenpunktanzahl -
- *    bei taeglich wachsender History wird das eine immer teurere Anfrage
- *    nur fuer eine Zahl. Nutzt jetzt /api/stats/summary + einen leichten
- *    COUNT-Ersatz ueber die 'all'-Aggregat-Anzahl (die Auswahl bleibt
- *    aggregiert/klein, siehe RANGE_CONFIG.all.resolution_s im Backend).
+/* dashboard.js - Starlink Monitor frontend
+ * Angle convention (dome + compass): 0deg = North = up, clockwise.
+ * See BACKEND_GUIDE / api-client.js for the data-fetching layer.
  */
 
 // ---------------------------------------------------------------------------
-// Farben
+// Colors
 // ---------------------------------------------------------------------------
 const COLORS = {
   green:  '#56d88f',
@@ -34,26 +15,24 @@ const COLORS = {
   text:   '#5a7390',
 };
 
-// Bekannte Starlink-Alarm-Bits (alerts_bitfield). Reihenfolge/Namen gemaess
-// gaengiger grpc_tunnel AlertsDish-Struktur; unbekannte Bits werden generisch
-// als "Bit N" angezeigt statt stillschweigend ignoriert zu werden.
+// Known Starlink alert bits (alerts_bitfield), per the standard grpc AlertsDish struct.
 const ALERT_BITS = [
-  { bit: 0,  label: 'Motoren stecken fest' },
-  { bit: 1,  label: 'Thermischer Shutdown' },
-  { bit: 2,  label: 'Nicht ausgerichtet' },
-  { bit: 3,  label: 'Kein Wärmeschild' },
-  { bit: 4,  label: 'Regen/Feuchtigkeit erkannt' },
-  { bit: 5,  label: 'Thermische Drosselung' },
-  { bit: 6,  label: 'Software-Update erforderlich' },
-  { bit: 7,  label: 'Langsames Ethernet' },
-  { bit: 8,  label: 'Übermäßige Bewegung' },
-  { bit: 9,  label: 'ID zurückgesetzt' },
-  { bit: 10, label: 'Marktzugang eingeschränkt' },
-  { bit: 11, label: 'Bewegung während Update' },
+  { bit: 0,  label: 'Motors stuck' },
+  { bit: 1,  label: 'Thermal shutdown' },
+  { bit: 2,  label: 'Unaligned' },
+  { bit: 3,  label: 'No thermal shroud' },
+  { bit: 4,  label: 'Rain/moisture detected' },
+  { bit: 5,  label: 'Thermal throttling' },
+  { bit: 6,  label: 'Software update required' },
+  { bit: 7,  label: 'Slow ethernet' },
+  { bit: 8,  label: 'Excessive motion' },
+  { bit: 9,  label: 'ID reset' },
+  { bit: 10, label: 'Market access restricted' },
+  { bit: 11, label: 'Moving during update' },
 ];
 
 // ---------------------------------------------------------------------------
-// Kleine Utilities
+// Small utilities
 // ---------------------------------------------------------------------------
 function fmtNum(v, decimals = 1, suffix = '') {
   return v == null ? '–' : `${v.toFixed(decimals)}${suffix}`;
@@ -61,7 +40,7 @@ function fmtNum(v, decimals = 1, suffix = '') {
 
 function yesNoSpan(value) {
   if (value === null || value === undefined) return '<span class="dim">–</span>';
-  return value ? '<span class="yes">Ja</span>' : '<span class="no">Nein</span>';
+  return value ? '<span class="yes">Yes</span>' : '<span class="no">No</span>';
 }
 
 function toLocalDatetimeInputValue(date) {
@@ -79,21 +58,20 @@ function formatUptime(seconds) {
   return `${m}m`;
 }
 
-// Alle Zeit-Anzeigen laufen ueber toLocaleString ohne explizite timeZone ->
-// der Browser rendert automatisch in der lokalen Zeitzone des Benutzers.
-// Chart.js x-Achsen bekommen ts*1000 (echte UTC-Millisekunden) und der
-// date-fns-Adapter im vendor-Bundle formatiert ebenfalls lokal (new Date(),
-// keine UTC-Getter) - beides bleibt also konsistent zueinander.
+// All timestamps render via toLocaleString without an explicit timeZone,
+// so the browser renders in the user's local timezone. Chart.js x-axes get
+// ts*1000 (true UTC milliseconds) and the date-fns adapter also formats
+// locally (new Date(), no UTC getters) - both stay consistent.
 function formatLocalDateTime(ts, opts = {}) {
-  return new Date(ts * 1000).toLocaleString('de-DE', {
+  return new Date(ts * 1000).toLocaleString('en-GB', {
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', ...opts,
   });
 }
 
 // ---------------------------------------------------------------------------
-// API-Zugriffe (fetchMetrics, fetchEvents, fetchSpeedtests, fetchDishStatus,
-// fetchWeatherCurrent, fetchStatsSummary, downloadCsv, adminDelete) leben in
-// api-client.js und muessen vor dieser Datei geladen sein.
+// Data-fetching functions (fetchMetrics, fetchEvents, fetchSpeedtests,
+// fetchDishStatus, fetchWeatherCurrent, fetchStatsSummary, downloadCsv,
+// adminDelete) live in api-client.js, which must load before this file.
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -106,14 +84,12 @@ const state = {
   dome: { azimuth: null, elevation: null },
 };
 
-const MAX_LIVE_POINTS = 43200; // ~24h bei 2s-Takt
+const MAX_LIVE_POINTS = 43200; // ~24h at 2s interval
 const LIVE_TRIM_BATCH = 120;
 
 // ---------------------------------------------------------------------------
-// Zeitachse: Einheit (Minute/Stunde/Tag/Monat/Jahr) wird dynamisch aus der
-// tatsaechlichen Zeitspanne (from/to) abgeleitet - siehe pickTimeAxisUnit()
-// in api-client.js. Skaliert automatisch mit dem gewaehlten Zeitraum, keine
-// Range->Einheit-Tabelle mehr hier.
+// Time axis unit (minute/hour/day/month/year) is derived dynamically from
+// the actual span (from/to) - see pickTimeAxisUnit() in api-client.js.
 // ---------------------------------------------------------------------------
 function applyTimeAxis(chart, fromTs, toTs) {
   const cfg = pickTimeAxisUnit(fromTs, toTs);
@@ -128,7 +104,7 @@ function minMaxAfterLabel(unitSuffix, decimals = 1) {
     const raw = ctx.raw;
     if (!raw || raw._min == null || raw._max == null) return undefined;
     if (Math.abs(raw._max - raw._min) < 10 ** -decimals) return undefined;
-    return `Tief: ${raw._min.toFixed(decimals)}${unitSuffix} · Hoch: ${raw._max.toFixed(decimals)}${unitSuffix}`;
+    return `Low: ${raw._min.toFixed(decimals)}${unitSuffix} · High: ${raw._max.toFixed(decimals)}${unitSuffix}`;
   };
 }
 
@@ -166,7 +142,7 @@ function baseChartOptions(yLabel, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Sky-View Dome (Canvas 2D)
+// Sky View dome (Canvas 2D)
 // ---------------------------------------------------------------------------
 const dome = { canvas: null, ctx: null, size: 220 };
 
@@ -177,10 +153,9 @@ function setupDomeCanvas() {
   window.addEventListener('resize', debounce(sizeDomeCanvas, 200));
 }
 
-// Bug-Fix ggue. Vorversion: Groesse wird aus der tatsaechlichen gerenderten
-// CSS-Box gelesen (getBoundingClientRect), nicht aus einer hart codierten
-// Konstante - so bleibt der Canvas-Buffer immer exakt scharf und zentriert,
-// egal ob 220px, oder kleiner auf schmalen Bildschirmen (max-width:100%).
+// Size is read from the actual rendered CSS box (getBoundingClientRect),
+// not a hardcoded constant - keeps the canvas buffer sharp and centered
+// at any width (e.g. smaller on narrow screens, max-width:100%).
 function sizeDomeCanvas() {
   const c = dome.canvas;
   if (!c) return;
@@ -200,8 +175,8 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-// Winkel-Konvention (einheitlich fuer Dome + Kompass):
-// 0deg = Norden = oben (12 Uhr), Winkel wachsen im Uhrzeigersinn.
+// Angle convention (shared by dome + compass):
+// 0deg = North = up (12 o'clock), angles increase clockwise.
 function polarToXY(cx, cy, radius, azimuthDeg) {
   const rad = (azimuthDeg - 90) * (Math.PI / 180);
   return { x: cx + Math.cos(rad) * radius, y: cy + Math.sin(rad) * radius };
@@ -220,7 +195,7 @@ function drawDome() {
   ctx.fillStyle = '#0d1520';
   ctx.fill();
 
-  // Elevations-Ringe (90=Zenit/Mitte, 0=Horizont/Aussenrand)
+  // Elevation rings (90=zenith/center, 0=horizon/outer edge)
   const elevSteps = [90, 75, 45, 25, 0];
   elevSteps.forEach((el, i) => {
     const r = ((90 - el) / 90) * R;
@@ -238,7 +213,7 @@ function drawDome() {
     }
   });
 
-  // Azimuth-Speichen alle 45deg
+  // Azimuth spokes every 45deg
   for (let az = 0; az < 360; az += 45) {
     const p = polarToXY(cx, cy, R, az);
     ctx.beginPath();
@@ -249,9 +224,9 @@ function drawDome() {
     ctx.stroke();
   }
 
-  // Himmelsrichtungen
+  // Cardinal directions
   const dirLabelR = R + Math.max(10, size * 0.05);
-  [['N', 0], ['O', 90], ['S', 180], ['W', 270]].forEach(([label, az]) => {
+  [['N', 0], ['E', 90], ['S', 180], ['W', 270]].forEach(([label, az]) => {
     const p = polarToXY(cx, cy, dirLabelR, az);
     ctx.fillStyle = '#5ba3d0';
     ctx.font = `bold ${Math.max(9, size * 0.045)}px JetBrains Mono, monospace`;
@@ -260,7 +235,7 @@ function drawDome() {
     ctx.fillText(label, p.x, p.y);
   });
 
-  // Dish-Nadel
+  // Dish needle
   if (dome.azimuth != null && dome.elevation != null) {
     const r = ((90 - dome.elevation) / 90) * R;
     const p = polarToXY(cx, cy, r, dome.azimuth);
@@ -291,7 +266,7 @@ function drawDome() {
     ctx.fillStyle = '#3a5070';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('ZENIT', cx, cy);
+    ctx.fillText('ZENITH', cx, cy);
   }
 
   ctx.beginPath();
@@ -308,7 +283,7 @@ function updateDome(azimuth, elevation) {
 }
 
 // ---------------------------------------------------------------------------
-// Kompass (SVG) — gleiche Winkel-Konvention wie der Dome
+// Compass (SVG) - same angle convention as the dome
 // ---------------------------------------------------------------------------
 function setCompass(azimuth, elevation) {
   const needle = document.getElementById('compassNeedle');
@@ -323,13 +298,13 @@ function setCompass(azimuth, elevation) {
 }
 
 // ---------------------------------------------------------------------------
-// Charts initialisieren
+// Initialize charts
 // ---------------------------------------------------------------------------
 function initCharts() {
   state.charts.drop = new Chart(document.getElementById('dropChart'), {
     type: 'line',
     data: { datasets: [{ label: 'Ping Drop %', data: [], borderColor: COLORS.green, backgroundColor: COLORS.green + '40', borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.2 }] },
-    options: baseChartOptions('Drop-Rate (%)', {
+    options: baseChartOptions('Drop Rate (%)', {
       tickCallback: (v) => `${v}%`,
       tooltipCallbacks: { label: (ctx) => `Drop: ${ctx.parsed.y.toFixed(2)} %` },
     }),
@@ -337,11 +312,11 @@ function initCharts() {
 
   state.charts.latency = new Chart(document.getElementById('latencyChart'), {
     type: 'line',
-    data: { datasets: [{ label: 'Latenz ms', data: [], borderColor: COLORS.cyan, backgroundColor: COLORS.cyan + '40', borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.2 }] },
-    options: baseChartOptions('Latenz (ms)', {
+    data: { datasets: [{ label: 'Latency ms', data: [], borderColor: COLORS.cyan, backgroundColor: COLORS.cyan + '40', borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.2 }] },
+    options: baseChartOptions('Latency (ms)', {
       tickCallback: (v) => `${v} ms`,
       tooltipCallbacks: {
-        label: (ctx) => `Latenz: ${ctx.parsed.y.toFixed(0)} ms${ctx.dataset._isAggregated ? ' (Ø)' : ''}`,
+        label: (ctx) => `Latency: ${ctx.parsed.y.toFixed(0)} ms${ctx.dataset._isAggregated ? ' (avg)' : ''}`,
         afterLabel: minMaxAfterLabel(' ms', 0),
       },
     }),
@@ -350,7 +325,7 @@ function initCharts() {
   const throughputOptions = baseChartOptions('Mbit/s', {
     tickCallback: (v) => `${v}`,
     tooltipCallbacks: {
-      label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} Mbit/s${ctx.dataset._isAggregated ? ' (Ø)' : ''}`,
+      label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} Mbit/s${ctx.dataset._isAggregated ? ' (avg)' : ''}`,
       afterLabel: minMaxAfterLabel(' Mbit/s', 1),
     },
   });
@@ -444,7 +419,7 @@ function initCharts() {
 }
 
 // ---------------------------------------------------------------------------
-// Event-Marker auf Charts
+// Event markers on charts
 // ---------------------------------------------------------------------------
 function applyEventMarkers(chart, events, typeFilter, color, resolutionS) {
   const dataset = chart.data.datasets[0];
@@ -469,7 +444,7 @@ function applyEventMarkers(chart, events, typeFilter, color, resolutionS) {
 }
 
 // ---------------------------------------------------------------------------
-// Metriken laden
+// Load metrics
 // ---------------------------------------------------------------------------
 async function loadMetrics(range, target) {
   const json = await fetchMetrics(range);
@@ -511,20 +486,20 @@ async function loadMetrics(range, target) {
     const events = await fetchEvents(range);
     if (target === 'drop' || target === 'both') applyEventMarkers(state.charts.drop, events, 'disconnect', COLORS.red, json.resolution_s);
     if (target === 'latency' || target === 'both') applyEventMarkers(state.charts.latency, events, 'latency_spike', COLORS.red, json.resolution_s);
-  } catch (_e) { /* Marker sind best-effort, kein harter Fehler */ }
+  } catch (_e) { /* markers are best-effort, not a hard error */ }
 }
 
 // ---------------------------------------------------------------------------
-// Speedtests laden
+// Load speedtests
 // ---------------------------------------------------------------------------
-// Kurzes deutsches Label fuer die Bucket-Breite eines aggregierten Punkts,
-// z.B. "4-Stunden-Ø" oder "2-Tage-Ø" - passt sich der tatsaechlichen
-// Aufloesung an, statt hart "Tages-Ø" zu sagen.
+// Short label for the bucket width of an aggregated point, e.g. "4-hr avg"
+// or "2-day avg" - adapts to the actual resolution instead of always
+// saying "daily avg".
 function bucketLabel(resolutionS) {
-  if (resolutionS < 3600) return `${Math.round(resolutionS / 60)}-Minuten-Ø`;
-  if (resolutionS < 86400) return `${Math.round(resolutionS / 3600)}-Stunden-Ø`;
+  if (resolutionS < 3600) return `${Math.round(resolutionS / 60)}-min avg`;
+  if (resolutionS < 86400) return `${Math.round(resolutionS / 3600)}-hr avg`;
   const days = resolutionS / 86400;
-  return `${days >= 1.5 ? Math.round(days) : days.toFixed(1)}-Tage-Ø`;
+  return `${days >= 1.5 ? Math.round(days) : days.toFixed(1)}-day avg`;
 }
 
 async function loadSpeedtests(range = 'all') {
@@ -536,7 +511,7 @@ async function loadSpeedtests(range = 'all') {
 
   applyTimeAxis(chart, json.from, json.to);
 
-  // rows nach Timestamp indizieren fuer O(1)-Lookup im Tooltip statt .find() pro Hover
+  // Index rows by timestamp for O(1) tooltip lookup instead of .find() per hover
   const byTs = new Map(rows.map((r) => [r.ts * 1000, r]));
   chart.options.plugins.tooltip.callbacks.label =
     (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} Mbit/s${isAgg ? ` (${label})` : ''}`;
@@ -547,7 +522,7 @@ async function loadSpeedtests(range = 'all') {
     const min = isDown ? r.min_download_mbit : r.min_upload_mbit;
     const max = isDown ? r.max_download_mbit : r.max_upload_mbit;
     if (min == null || max == null) return undefined;
-    return `Tief: ${min.toFixed(1)} · Hoch: ${max.toFixed(1)} Mbit/s (${r.sample_count} Tests)`;
+    return `Low: ${min.toFixed(1)} · High: ${max.toFixed(1)} Mbit/s (${r.sample_count} tests)`;
   };
 
   chart.data.datasets[0].data = rows.map((r) => ({ x: r.ts * 1000, y: r.download_mbit }));
@@ -555,11 +530,11 @@ async function loadSpeedtests(range = 'all') {
   chart.update();
 
   document.getElementById('speedtestCount').textContent =
-    isAgg ? `${rows.length} Zeitfenster (${label})` : `${rows.length} Tests`;
+    isAgg ? `${rows.length} windows (${label})` : `${rows.length} tests`;
 }
 
 // ---------------------------------------------------------------------------
-// Traffic-Balkendiagramm (Datenvolumen Down/Up in GB)
+// Traffic bar chart (down/up data volume in GB)
 // ---------------------------------------------------------------------------
 async function loadTraffic(range = '7d') {
   const json = await fetchTraffic(range);
@@ -575,12 +550,12 @@ async function loadTraffic(range = '7d') {
   const totalEl = document.getElementById('trafficTotal');
   if (totalEl) {
     totalEl.textContent =
-      `Gesamt: ${json.totals.down_gb.toFixed(1)} GB ↓ · ${json.totals.up_gb.toFixed(1)} GB ↑`;
+      `Total: ${json.totals.down_gb.toFixed(1)} GB ↓ · ${json.totals.up_gb.toFixed(1)} GB ↑`;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Peak-Werte-Kachel (Bestwerte aus den 2s-Live-Abtastungen)
+// Peak-values tile (best values from 2s live sampling)
 // ---------------------------------------------------------------------------
 async function loadPeakStats(range = '1d') {
   const s = await fetchPeakStats(range);
@@ -593,7 +568,7 @@ async function loadPeakStats(range = '1d') {
 }
 
 // ---------------------------------------------------------------------------
-// Stat-Kacheln
+// Stat tiles
 // ---------------------------------------------------------------------------
 function setStatLevel(el, value, warnThresh, errThresh, higherIsBad = true) {
   el.classList.remove('ok', 'warn', 'err', 'blue');
@@ -637,7 +612,7 @@ async function loadSummary() {
 }
 
 // ---------------------------------------------------------------------------
-// Wetter
+// Weather
 // ---------------------------------------------------------------------------
 const WMO_ICON = {
   0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️', 45: '🌫️', 48: '🌫️',
@@ -650,18 +625,18 @@ async function loadWeather() {
   const w = await fetchWeatherCurrent();
   if (!w || !w.ts) return;
   const icon = WMO_ICON[w.wmo_code] ?? '·';
-  document.getElementById('weatherCity').textContent = 'Krefeld';
+  document.getElementById('weatherCity').textContent = 'Krefeld';  // adjust to your own location if you fork this
   document.getElementById('weatherMain').textContent =
     `${icon} ${fmtNum(w.temp_c, 0, ' °C')} · Wind ${fmtNum(w.wind_kmh, 0, ' km/h')}`;
   document.getElementById('weatherExtra').textContent =
-    `Sicht ${w.visibility_m != null ? (w.visibility_m / 1000).toFixed(0) + ' km' : '–'} · Luftf. ${fmtNum(w.humidity, 0, ' %')}`;
+    `Visibility ${w.visibility_m != null ? (w.visibility_m / 1000).toFixed(0) + ' km' : '–'} · Humidity ${fmtNum(w.humidity, 0, ' %')}`;
   const warnEl = document.getElementById('weatherWarn');
   if (w.warning) { warnEl.textContent = `⚡ ${w.warning}`; warnEl.style.display = ''; }
   else { warnEl.style.display = 'none'; }
 }
 
 // ---------------------------------------------------------------------------
-// Dish-Status + Geraete-Alarme
+// Dish status + device alerts
 // ---------------------------------------------------------------------------
 function renderAlerts(bitfield) {
   const grid = document.getElementById('alertGrid');
@@ -669,7 +644,7 @@ function renderAlerts(bitfield) {
   if (!grid) return;
 
   if (bitfield == null) {
-    grid.innerHTML = '<div class="event-empty">Keine Alarm-Daten verfügbar.</div>';
+    grid.innerHTML = '<div class="event-empty">No alert data available.</div>';
     if (summary) summary.textContent = '';
     return;
   }
@@ -685,8 +660,8 @@ function renderAlerts(bitfield) {
 
   if (summary) {
     summary.textContent = activeBits.length
-      ? `${activeBits.length} aktiv`
-      : 'keine aktiv';
+      ? `${activeBits.length} active`
+      : 'none active';
   }
 }
 
@@ -727,12 +702,12 @@ async function loadDishStatus() {
 }
 
 // ---------------------------------------------------------------------------
-// Event-Log
+// Event log
 // ---------------------------------------------------------------------------
 function eventClassAndTag(type) {
   switch (type) {
     case 'disconnect':    return { cls: 'disc', tag: 'tag-err', label: 'Disconnect' };
-    case 'latency_spike':  return { cls: 'warn', tag: 'tag-warn', label: 'Latenzspitze' };
+    case 'latency_spike':  return { cls: 'warn', tag: 'tag-warn', label: 'Latency Spike' };
     case 'obstruction':    return { cls: 'warn', tag: 'tag-warn', label: 'Obstruction' };
     case 'speedtest':      return { cls: 'ok', tag: 'tag-ok', label: 'Speedtest' };
     default:                return { cls: '', tag: 'tag-warn', label: type };
@@ -744,9 +719,9 @@ function formatEventMessage(ev) {
   try { det = JSON.parse(ev.details || '{}'); } catch (_e) { /* details optional */ }
   switch (ev.type) {
     case 'disconnect':
-      return `Verbindungsabbruch${ev.duration_s ? ' · ' + ev.duration_s.toFixed(0) + ' s' : ''}${det.last_known_latency_ms ? ' · letzte Latenz ' + Math.round(det.last_known_latency_ms) + ' ms' : ''}`;
+      return `Connection lost${ev.duration_s ? ' · ' + ev.duration_s.toFixed(0) + ' s' : ''}${det.last_known_latency_ms ? ' · last latency ' + Math.round(det.last_known_latency_ms) + ' ms' : ''}`;
     case 'latency_spike':
-      return `Latenzspitze${det.peak_ms ? ' · Peak ' + Math.round(det.peak_ms) + ' ms' : ''}${ev.duration_s ? ' · ' + ev.duration_s.toFixed(0) + ' s' : ''}`;
+      return `Latency spike${det.peak_ms ? ' · peak ' + Math.round(det.peak_ms) + ' ms' : ''}${ev.duration_s ? ' · ' + ev.duration_s.toFixed(0) + ' s' : ''}`;
     case 'speedtest':
       return `Speedtest · Down ${det.download_mbit?.toFixed(0) ?? '–'} Mbit/s · Up ${det.upload_mbit?.toFixed(0) ?? '–'} Mbit/s · RTT ${det.latency_ms ? Math.round(det.latency_ms) : '–'} ms`;
     default:
@@ -759,7 +734,7 @@ async function loadEvents() {
   try {
     const events = await fetchEvents('7d');
     if (!events.length) {
-      list.innerHTML = '<div class="event-empty">Keine Events in den letzten 7 Tagen.</div>';
+      list.innerHTML = '<div class="event-empty">No events in the last 7 days.</div>';
       return;
     }
     list.innerHTML = events.slice(0, 100).map((ev) => {
@@ -771,7 +746,7 @@ async function loadEvents() {
       </div>`;
     }).join('');
   } catch (e) {
-    list.innerHTML = `<div class="event-empty" style="color:#e0566e">Fehler beim Laden: ${e.message}</div>`;
+    list.innerHTML = `<div class="event-empty" style="color:#e0566e">Error loading events: ${e.message}</div>`;
   }
 }
 
@@ -781,25 +756,24 @@ async function loadEvents() {
 async function loadFooter(stats) {
   try {
     const summaryStats = stats || await fetchStatsSummary();
-    // Nur den aeltesten Zeitstempel brauchen, kein volles fetchMetrics('all')
-    // mehr noetig (das gaebe bei fester Ziel-Punktanzahl ohnehin immer nur
-    // ~TARGET_POINTS zurueck, waere also als "Anzahl Datenpunkte" sinnlos).
+    // Only need the oldest timestamp here, not a full fetchMetrics('all')
+    // (which would return only ~TARGET_POINTS anyway due to bucketing).
     const [from] = await resolveRange('all');
     const days = Math.max(1, Math.round((Date.now() / 1000 - from) / 86400));
 
     let stInfo = '';
     if (summaryStats.last_speedtest) {
       const ago = Math.round((Date.now() / 1000 - summaryStats.last_speedtest.ts) / 3600);
-      stInfo = ` · Speedtest vor ${ago}h (${summaryStats.last_speedtest.download_mbit.toFixed(0)}↓/${summaryStats.last_speedtest.upload_mbit.toFixed(0)}↑ Mbit/s)`;
+      stInfo = ` · speedtest ${ago}h ago (${summaryStats.last_speedtest.download_mbit.toFixed(0)}↓/${summaryStats.last_speedtest.upload_mbit.toFixed(0)}↑ Mbit/s)`;
     }
-    document.getElementById('footerStats').textContent = `Daten seit ${days} Tagen${stInfo}`;
+    document.getElementById('footerStats').textContent = `Data since ${days} days ago${stInfo}`;
   } catch (e) {
     console.error('Footer:', e);
   }
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket + Live-Modus
+// WebSocket + live mode
 // ---------------------------------------------------------------------------
 function setConnStatus(kind, latencyMs) {
   const pill = document.getElementById('connStatus');
@@ -873,7 +847,7 @@ function handleLivePoint(point) {
     }
   }
 
-  // Dish-Sektion + Dome bleiben live, unabhaengig vom Chart-Live-Modus
+  // Dish section + dome stay live regardless of chart live mode
   setCompass(point.direction_azimuth, point.direction_elevation);
   if (point.direction_azimuth != null || point.direction_elevation != null) {
     updateDome(point.direction_azimuth, point.direction_elevation);
@@ -900,7 +874,7 @@ function handleLivePoint(point) {
 }
 
 // ---------------------------------------------------------------------------
-// Range-Buttons + Live-Mode-Toggle
+// Range buttons + live-mode toggle
 // ---------------------------------------------------------------------------
 function setLiveMode(on) {
   state.liveMode = on;
@@ -939,7 +913,7 @@ function initRangeButtons() {
           else if (target === 'traffic') await loadTraffic(range);
           else await loadMetrics(range, target);
         } catch (e) {
-          console.error(`Range-Wechsel (${target}=${range}) fehlgeschlagen:`, e);
+          console.error(`Range switch (${target}=${range}) failed:`, e);
         }
       });
     });
@@ -964,32 +938,29 @@ function initRangeButtons() {
 }
 
 // ---------------------------------------------------------------------------
-// CSV-Export
+// CSV export
 // ---------------------------------------------------------------------------
 function initExportButton() {
   const btn = document.getElementById('exportBtn');
   if (btn) {
     btn.addEventListener('click', () => {
-      downloadCsv(state.ranges.drop).catch((e) => console.error('CSV-Export fehlgeschlagen:', e));
+      downloadCsv(state.ranges.drop).catch((e) => console.error('CSV export failed:', e));
     });
   }
 }
 
 // ---------------------------------------------------------------------------
-// Admin-Panel (Datenverwaltung)
+// Admin panel (data management)
 // ---------------------------------------------------------------------------
-// Normalisiert die unterschiedlichen Response-Formen der Admin-DELETE-
-// Endpunkte auf eine einzelne "Anzahl geloeschter Zeilen"-Zahl:
-//   /api/admin/events      -> { deleted: N }
-//   /api/admin/speedtests  -> { deleted: N }
-//   /api/admin/metrics     -> { deleted_raw: N, deleted_minutely: N }   (kein "deleted"!)
-//   /api/admin/all         -> { deleted: { events: N, metrics: N, ... } }
+// Normalizes the different admin-DELETE response shapes into a single
+// "rows deleted" count (metrics returns deleted_raw/deleted_minutely
+// instead of deleted; all returns a per-table breakdown object).
 function totalDeletedFromResponse(data) {
   if (typeof data.deleted === 'number') return data.deleted;
   if (data.deleted && typeof data.deleted === 'object') {
     return Object.values(data.deleted).reduce((a, b) => a + (Number(b) || 0), 0);
   }
-  // Fallback fuer /api/admin/metrics, das deleted_raw/deleted_minutely statt deleted liefert
+  // Fallback for /api/admin/metrics, which returns deleted_raw/deleted_minutely instead of deleted
   const rawKeys = Object.keys(data).filter((k) => k.startsWith('deleted'));
   if (rawKeys.length) {
     return rawKeys.reduce((sum, k) => sum + (Number(data[k]) || 0), 0);
@@ -1041,16 +1012,16 @@ function initAdminPanel() {
       const to_ts = toInput.value ? Math.floor(new Date(toInput.value).getTime() / 1000) : null;
       const labelEl = btn.querySelector('span:nth-child(2)');
       const label = labelEl ? labelEl.textContent : target;
-      if (!confirm(`"${label}" löschen${from_ts || to_ts ? ' im gewählten Zeitraum' : ' (ALLES)'}?`)) return;
+      if (!confirm(`Delete "${label}"${from_ts || to_ts ? ' in the selected time range' : ' (EVERYTHING)'}?`)) return;
 
       const allButtons = document.querySelectorAll('.admin-action-btn');
       allButtons.forEach((b) => { b.disabled = true; });
-      showResult('Wird gelöscht…', '');
+      showResult('Deleting…', '');
 
       try {
         const data = await adminDelete(target, from_ts, to_ts);
         const total = totalDeletedFromResponse(data);
-        showResult(`✓ ${total.toLocaleString('de-DE')} Zeilen gelöscht.`, 'ok');
+        showResult(`✓ ${total.toLocaleString('en-US')} rows deleted.`, 'ok');
 
         await Promise.allSettled([
           loadMetrics(state.ranges.drop, 'both'),
@@ -1060,7 +1031,7 @@ function initAdminPanel() {
           loadEvents(),
         ]);
       } catch (e) {
-        showResult(`Fehler: ${e.message}`, 'err');
+        showResult(`Error: ${e.message}`, 'err');
       } finally {
         allButtons.forEach((b) => { b.disabled = false; });
       }

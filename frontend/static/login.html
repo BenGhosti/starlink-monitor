@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Anmeldung · Starlink Monitor</title>
+<title>Sign In · Starlink Monitor</title>
 <link rel="stylesheet" href="/static/login.css">
 </head>
 <body>
@@ -20,30 +20,30 @@
     <form class="login-card" id="loginForm" autocomplete="off">
       <div class="login-brand">
         <span class="login-logo">Starlink Monitor</span>
-        <span class="login-sub">Zugang zum Dashboard</span>
+        <span class="login-sub">Dashboard Access</span>
       </div>
 
       <label class="login-field">
-        <span>Benutzername</span>
+        <span>Username</span>
         <input type="text" id="loginUser" name="username" autocomplete="username" required autofocus>
       </label>
 
       <label class="login-field">
-        <span>Passwort</span>
+        <span>Password</span>
         <input type="password" id="loginPass" name="password" autocomplete="current-password" required>
       </label>
 
       <label class="login-field" id="loginTotpField">
-        <span>2FA-Code (falls aktiviert)</span>
+        <span>2FA Code (if enabled)</span>
         <input type="text" id="loginTotp" name="totp_code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="123456">
       </label>
 
-      <button type="submit" class="login-submit" id="loginSubmit">Anmelden</button>
+      <button type="submit" class="login-submit" id="loginSubmit">Sign In</button>
 
       <div class="login-error" id="loginError" style="display:none"></div>
     </form>
 
-    <div class="login-footer">Unraid · Dedicated Frankfurt</div>
+    <div class="login-footer">Starlink Monitor by <a href="https://ben-ghosti.de" target="_blank" rel="noopener">Ben Ghosti</a></div>
   </div>
 
 <script src="/static/login.js"></script>

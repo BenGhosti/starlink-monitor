@@ -1,35 +1,24 @@
 """
 cleanup.py
-Laeuft einmal taeglich (siehe collect.py) als eigene Task im Collector-Prozess.
+Runs once a day (see collect.py) as its own task in the collector process.
 
-Logik:
-- Metrics-Rohdaten (alle 2s) aelter als RETENTION_DAYS (90) werden pro
-  vollstaendiger Stunde zu einem Aggregat in `metrics_hourly` zusammengefasst
-  (avg drop rate, avg/max latency, avg obstruction, avg throughput, sample_count).
-- Danach werden genau die komprimierten Rohzeilen aus `metrics` geloescht.
-- events, speedtests und weather bleiben unangetastet (deutlich geringeres
-  Datenvolumen, lohnt sich nicht zu aggregieren).
-- Felder wie Ausrichtung (Azimuth/Elevation), GPS-Status und Geraeteinfo werden
-  bewusst NICHT in metrics_hourly uebernommen: das sind Punkt-in-Zeit-Zustaende
-  ohne sinnvolle "Durchschnitts"-Bedeutung nach 90 Tagen (die Dish-Ausrichtung
-  aendert sich praktisch nie, GPS-Sat-Anzahl ist nur im Live-Betrieb relevant).
-  Wer das spaeter braucht, sollte sie separat in dish_info_history o.ae. festhalten.
-- metrics_minutely (kontinuierlich von metrics_minutely_aggregator.py befuellt,
-  liefert die API-Aggregation fuer 7d-1m Zeitraeume) wird HIER zusaetzlich mit
-  einer eigenen, deutlich laengeren Retention (MINUTELY_RETENTION_DAYS, Default
-  2 Jahre) aufgeraeumt. Bei 1 Zeile/Minute ist das Volumen ca. Faktor 30 kleiner
-  als bei den 2s-Rohdaten, daher lohnt sich eine laengere Aufbewahrung. Aeltere
-  Minutendaten werden ersatzlos geloescht (nicht weiter komprimiert), da
-  metrics_hourly fuer sehr alte Zeitraeume bereits existiert.
-- Wichtige Reihenfolge-Annahme: metrics_minutely_aggregator.py aggregiert JEDE
-  Minute zeitnah (plus einmaligen Backfill beim Start, siehe dort), bevor
-  compress_old_metrics() hier Rohdaten loescht (erst nach 90 Tagen). Die
-  Minuten-Aggregation ist also so gut wie immer fertig, lange bevor die
-  zugehoerigen Rohdaten ueberhaupt zum Loeschen anstehen - es sei denn, der
-  Collector waere die vollen 90 Tage am Stueck offline (dann gaebe es ohnehin
-  keine Rohdaten zum Verlieren).
-- Idempotent: bereits aggregierte Stunden werden via UNIQUE(ts_hour) + INSERT OR REPLACE
-  nicht doppelt angelegt, falls der Job mehrfach ueber denselben Bereich laeuft.
+Three-tier compression:
+- Raw metrics (2s ticks) older than RETENTION_DAYS (90) get rolled up into
+  hourly aggregates in `metrics_hourly` (avg drop rate, avg/max latency,
+  avg obstruction, avg throughput, traffic bytes, sample_count), then the
+  compressed raw rows are deleted.
+- metrics_hourly rows older than HOURLY_ROLLUP_DAYS (default 365) get rolled
+  up further into `metrics_daily`, then deleted.
+- metrics_minutely (filled continuously by metrics_minutely_aggregator.py)
+  gets its own, much longer retention (MINUTELY_RETENTION_DAYS, default ~2
+  years) and is simply deleted past that point, not compressed further -
+  metrics_hourly/metrics_daily already cover that range.
+- events, speedtests, weather are untouched (low volume, not worth aggregating).
+- Point-in-time fields (dish orientation, GPS status, device info) are
+  intentionally NOT carried into the aggregates - they have no meaningful
+  "average" after 90 days.
+- Idempotent: UNIQUE(ts_hour)/UNIQUE(ts_day) + ON CONFLICT UPDATE means
+  re-running over the same range never double-counts.
 """
 
 import asyncio
@@ -42,9 +31,9 @@ from db import get_db, RAW_SAMPLE_INTERVAL_S
 logger = logging.getLogger("cleanup")
 
 RETENTION_DAYS = 90
-MINUTELY_RETENTION_DAYS = int(os.environ.get("MINUTELY_RETENTION_DAYS", "730"))  # ~2 Jahre
-HOURLY_ROLLUP_DAYS = int(os.environ.get("HOURLY_ROLLUP_DAYS", "365"))  # ab hier -> metrics_daily
-RUN_INTERVAL_S = 24 * 60 * 60  # einmal taeglich
+MINUTELY_RETENTION_DAYS = int(os.environ.get("MINUTELY_RETENTION_DAYS", "730"))  # ~2 years
+HOURLY_ROLLUP_DAYS = int(os.environ.get("HOURLY_ROLLUP_DAYS", "365"))  # rolls up to metrics_daily past this age
+RUN_INTERVAL_S = 24 * 60 * 60  # once a day
 HOUR_S = 3600
 DAY_S = 24 * HOUR_S
 
@@ -52,15 +41,15 @@ DAY_S = 24 * HOUR_S
 async def compress_old_metrics(db):
     cutoff_ts = int(time.time()) - RETENTION_DAYS * 24 * HOUR_S
 
-    # Aelteste vorhandene Rohdaten-Stunde ermitteln, um nicht ueber Jahre leere Stunden zu iterieren
+    # Find the oldest raw row so we don't iterate over years of empty hours
     async with db.execute("SELECT MIN(ts) FROM metrics WHERE ts < ?", (cutoff_ts,)) as cur:
         row = await cur.fetchone()
     if not row or row[0] is None:
-        logger.info("Keine Rohdaten aelter als %s Tage, nichts zu komprimieren.", RETENTION_DAYS)
+        logger.info("No raw data older than %s days, nothing to compress.", RETENTION_DAYS)
         return
 
     start_hour = (row[0] // HOUR_S) * HOUR_S
-    end_hour = (cutoff_ts // HOUR_S) * HOUR_S  # letzte VOLLSTAENDIGE Stunde vor dem Cutoff
+    end_hour = (cutoff_ts // HOUR_S) * HOUR_S  # last FULL hour before the cutoff
 
     compressed_hours = 0
     deleted_rows = 0
@@ -115,35 +104,32 @@ async def compress_old_metrics(db):
         ts_hour = next_hour
 
     await db.commit()
-    # Hinweis: PRAGMA incremental_vacuum/VACUUM bewusst NICHT hier ausgefuehrt -
-    # VACUUM blockiert die gesamte DB exklusiv und wuerde metrics_collector/ping_watchdog
-    # fuer die Dauer des Vacuums (bei 15 Mio+ Zeilen potenziell Minuten) lahmlegen.
-    # WAL-Checkpointing erledigt Platzfreigabe inkrementell im Hintergrund.
+    # Deliberately no VACUUM here - it locks the whole DB exclusively and
+    # would stall metrics_collector/ping_watchdog for the duration. WAL
+    # checkpointing reclaims space incrementally in the background.
 
     logger.info(
-        "Cleanup abgeschlossen: %s Stunden komprimiert, %s Rohzeilen geloescht.",
+        "Cleanup done: %s hours compressed, %s raw rows deleted.",
         compressed_hours, deleted_rows,
     )
 
 
 async def compress_old_hourly(db):
-    """Dritte Kompressionsstufe: metrics_hourly-Zeilen aelter als
-    HOURLY_ROLLUP_DAYS (Default 1 Jahr) werden pro vollstaendigem Kalendertag
-    (UTC) zu metrics_daily verdichtet, danach werden die Quell-Stunden
-    geloescht. sample_count wird als SUM() der Stunden-sample_counts
-    uebernommen (echte Anzahl zugrunde liegender 2s-Messungen), nicht als
-    Zeilenzahl - damit bleibt die Gewichtung ueber Rollup-Stufen hinweg exakt.
-    """
+    """Third compression tier: rolls up metrics_hourly rows older than
+    HOURLY_ROLLUP_DAYS into metrics_daily per full calendar day (UTC), then
+    deletes the source hours. sample_count is SUM() of the hourly
+    sample_counts (the real underlying 2s-sample count), not row count, so
+    weighting stays exact across rollup stages."""
     cutoff_ts = int(time.time()) - HOURLY_ROLLUP_DAYS * DAY_S
 
     async with db.execute("SELECT MIN(ts_hour) FROM metrics_hourly WHERE ts_hour < ?", (cutoff_ts,)) as cur:
         row = await cur.fetchone()
     if not row or row[0] is None:
-        logger.info("Keine metrics_hourly-Zeilen aelter als %s Tage, nichts zu Tages-Buckets zu verdichten.", HOURLY_ROLLUP_DAYS)
+        logger.info("No metrics_hourly rows older than %s days, nothing to roll up.", HOURLY_ROLLUP_DAYS)
         return
 
     start_day = (row[0] // DAY_S) * DAY_S
-    end_day = (cutoff_ts // DAY_S) * DAY_S  # letzter VOLLSTAENDIGER Tag vor dem Cutoff
+    end_day = (cutoff_ts // DAY_S) * DAY_S  # last FULL day before the cutoff
 
     compressed_days = 0
     deleted_rows = 0
@@ -203,26 +189,26 @@ async def compress_old_hourly(db):
     await db.commit()
 
     logger.info(
-        "Hourly-Rollup abgeschlossen: %s Tage zu metrics_daily verdichtet, %s Stunden-Zeilen geloescht.",
+        "Hourly rollup done: %s days rolled into metrics_daily, %s hourly rows deleted.",
         compressed_days, deleted_rows,
     )
 
 
 async def cleanup_old_minutely(db):
-    """Loescht metrics_minutely-Zeilen aelter als MINUTELY_RETENTION_DAYS.
-    Keine Komprimierung (anders als bei compress_old_metrics) - fuer sehr
-    alte Zeitraeume existiert bereits metrics_hourly."""
+    """Deletes metrics_minutely rows older than MINUTELY_RETENTION_DAYS.
+    No compression (unlike compress_old_metrics) - metrics_hourly/
+    metrics_daily already cover that far back."""
     cutoff_ts = int(time.time()) - MINUTELY_RETENTION_DAYS * 24 * HOUR_S
     cursor = await db.execute("DELETE FROM metrics_minutely WHERE ts_minute < ?", (cutoff_ts,))
     await db.commit()
     if cursor.rowcount:
-        logger.info("metrics_minutely Cleanup: %s Zeilen aelter als %s Tage geloescht.",
+        logger.info("metrics_minutely cleanup: %s rows older than %s days deleted.",
                      cursor.rowcount, MINUTELY_RETENTION_DAYS)
 
 
 async def run():
     logger.info(
-        "cleanup-Job startet, Retention=%s Tage (Rohdaten), %s Tage (minutely), Intervall=%sh",
+        "cleanup job starting, retention=%s days (raw), %s days (minutely), interval=%sh",
         RETENTION_DAYS, MINUTELY_RETENTION_DAYS, RUN_INTERVAL_S / 3600,
     )
     db = await get_db()
@@ -232,12 +218,12 @@ async def run():
                 await compress_old_metrics(db)
                 await compress_old_hourly(db)
                 await cleanup_old_minutely(db)
-                # Aktualisiert SQLite's Query-Planner-Statistiken (leichtgewichtig,
-                # kein Tabellen-Rewrite wie VACUUM) - nach jedem Kompressions-
-                # Lauf sinnvoll, weil sich die Zeilenverteilung deutlich verschiebt.
+                # Refreshes SQLite's query-planner statistics (lightweight,
+                # no table rewrite like VACUUM) - worth doing after each
+                # compression pass since the row distribution shifts a lot.
                 await db.execute("PRAGMA optimize;")
             except Exception:  # noqa: BLE001
-                logger.exception("Fehler im Cleanup-Lauf")
+                logger.exception("Error in cleanup run")
             await asyncio.sleep(RUN_INTERVAL_S)
     finally:
         await db.close()

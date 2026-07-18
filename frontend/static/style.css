@@ -205,7 +205,7 @@ html, body {
 .chart-area-tall { height: 230px; }
 .chart-area canvas { max-width: 100%; }
 
-/* ============ DISH-STATUS SEKTION ============ */
+/* ============ DISH STATUS SECTION ============ */
 .dish-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -240,7 +240,7 @@ html, body {
 .info-row .no { color: #e0566e; }
 .info-row .dim { color: #3a5070; font-weight: 400; }
 
-/* ============ ALERT-GRID (Geraete-Alarme aus dem Bitfeld) ============ */
+/* ============ ALERT GRID (device alerts from the bitfield) ============ */
 .alert-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -310,6 +310,9 @@ html, body {
   font-family: 'JetBrains Mono', monospace;
 }
 .export-btn:hover { border-color: #5ba3d044; color: #5ba3d0; }
+.brand-credit { color: #2a3d52; }
+.brand-credit a { color: #4a6580; text-decoration: none; }
+.brand-credit a:hover { color: #5ba3d0; }
 
 /* ============ RESPONSIVE ============ */
 @media (max-width: 1200px) {
@@ -336,10 +339,9 @@ html, body {
   padding: 8px 0 4px;
   flex: 1;
 }
-/* Feste intrinsische Groesse UND CSS-Groesse zusammen verhindern, dass der
-   Canvas beim ersten Layout-Pass (bevor Chart.js/Fonts geladen sind) mit
-   0x0 oder einer falschen Groesse initialisiert wird - das war der Grund
-   fuer den winzigen, halb-leeren Dome im alten Dashboard. */
+/* Explicit intrinsic size + CSS size together prevent the canvas from
+   initializing at 0x0 (or the wrong size) during the first layout pass,
+   before Chart.js/fonts have loaded. */
 #domCanvas {
   display: block;
   width: 220px;
