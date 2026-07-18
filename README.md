@@ -20,6 +20,12 @@ A lightweight, self-hosted web dashboard and telemetry collector designed to mon
 
 ---
 
+## 🖼️ Dashboard Preview
+
+![Starlink Monitor Dashboard](assets/dashboard.png)
+
+---
+
 ## 🛠️ Tech Stack
 
 * **Backend / Collector:** Python 3, `grpcio`, `deep-translator` (localization)
@@ -37,18 +43,23 @@ A lightweight, self-hosted web dashboard and telemetry collector designed to mon
 
 ### Installation & Setup
 
-1. **Clone the repository:**
+1. **Clone the repository**
+   ```bash
    git clone https://github.com/BenGhosti/StarlinkMonitor.git
    cd StarlinkMonitor
+   ```
 
-2. **Configure Environment Variables:**
-   Copy the example environment file and adjust it to your setup:
+2. **Configure Environment Variables**
+   ```bash
    cp example.env .env
+   ```
 
-3. **Deploy with Docker Compose:**
+3. **Deploy with Docker Compose**
+   ```bash
    docker-compose up -d
+   ```
 
-The dashboard will now be accessible via your configured port (e.g., `http://localhost:8080`).
+The dashboard will now be accessible via your configured port (e.g. `http://localhost:8080`).
 
 ---
 
@@ -61,12 +72,39 @@ StarlinkMonitor/
 ├── scripts/            # Maintenance, translation, and 2FA automation scripts
 ├── data/               # Persistent SQLite database storage (local & untracked)
 ├── archive/            # Local backup/ZIP folder (untracked)
+├── assets/             # README images and documentation assets
 ├── docker-compose.yml  # Multi-container orchestration
 └── README.md           # Project documentation
+```
 
+---
 
+## 🔒 Data & Safety
 
-🔒 License & Safety
+### Data Isolation
 
-Data Isolation:
-All database entries (data/), .env configurations, and legacy backup .zip files are strictly excluded from git tracking to prevent accidental data leaks.
+The following files and directories are intentionally excluded from Git version control to prevent accidental data exposure:
+
+- `data/` (SQLite database)
+- `.env`
+- `archive/*.zip`
+- Temporary cache and log files
+
+---
+
+## © Copyright
+
+Copyright © 2026 BenGhosti. All rights reserved.
+
+The Starlink Monitor dashboard, web interface, database architecture, Docker configuration, and application logic are © 2026 BenGhosti.
+
+This project incorporates and relies on components from the open-source **starlink-grpc-tools** project for communication with the Starlink terminal.
+
+**Third-Party Software**
+
+- **starlink-grpc-tools**
+  - Copyright © the starlink-grpc-tools contributors
+  - Repository: https://github.com/sparky8512/starlink-grpc-tools
+  - Licensed under its respective open-source license.
+
+Starlink is a trademark of SpaceX and is not affiliated with or endorsed by this project.
