@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Starlink Monitor</title>
-<link rel="stylesheet" href="/static/style.css">
-<script src="/static/vendor/chart.umd.js"></script>
-<script src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+<link rel="stylesheet" href="/static/style.css?v=3">
+<script defer src="/static/vendor/chart.umd.js"></script>
+<script defer src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
 <div class="db">
@@ -15,6 +15,7 @@
   <div class="topbar">
     <span class="logo">Starlink Monitor</span>
     <div class="topbar-right">
+      <span class="topbar-meta" id="topbarMeta">Unraid · Gigabit</span>
       <button class="admin-btn" id="adminBtn" title="Data Management">⚙</button>
       <button class="live-btn live-active" id="liveModeBtn" title="Toggle live mode">⏸ Pause</button>
       <span class="status-pill" id="connStatus"><span class="dot" id="connDot"></span><span id="connText">Connecting...</span></span>
@@ -345,7 +346,7 @@
 
 </div>
 
-<script src="/static/api-client.js"></script>
-<script src="/static/dashboard.js"></script>
+<script defer src="/static/api-client.js?v=3"></script>
+<script defer src="/static/dashboard.js?v=3"></script>
 </body>
 </html>

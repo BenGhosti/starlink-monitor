@@ -27,18 +27,71 @@ const RANGE_SECONDS = {
 };
 
 let _earliestTsCache = null; // resolved once per page load
+let _earliestTsPromise = null; // de-dupes concurrent callers while resolving
+
+// Shared cache for "oldest row of table X" lookups - fetchMetrics() and
+// fetchTraffic() both need the oldest metrics_minutely/metrics_hourly row
+// to decide where to fall back to the next tier, and previously each
+// re-fetched that separately (and sequentially) on every single call. On a
+// high-latency connection (reverse proxy / public domain) those extra
+// round trips are the main reason charts feel slow to load.
+const _oldestRowCache = new Map();
+async function _getOldestRow(table, tsField) {
+  if (_oldestRowCache.has(table)) return _oldestRowCache.get(table);
+  const raw = await apiRaw(table, { limit: 1, order: 'asc' });
+  const row = raw.data[0];
+  const ts = row ? row[tsField] : Infinity;
+  _oldestRowCache.set(table, ts);
+  return ts;
+}
+
+// Short-lived memoization for fetchMetrics(range): dashboard.js calls it
+// from multiple places on initial load (charts + peak stats) for the same
+// range at nearly the same time - without this they'd each independently
+// refetch and reprocess the exact same data over the network.
+const _metricsMemo = new Map(); // range -> { promise, ts }
+const METRICS_MEMO_TTL_MS = 8000;
+
+function _invalidateCaches() {
+  _earliestTsCache = null;
+  _earliestTsPromise = null;
+  _oldestRowCache.clear();
+  _metricsMemo.clear();
+}
+
+// Priority order matters (daily is checked first): a table earlier in this
+// list being non-empty means later tables are irrelevant even if they also
+// have rows (e.g. metrics_daily existing means metrics_hourly's oldest row
+// was already rolled up and deleted, so it's not the true "earliest" data).
+const EARLIEST_TS_TABLES = [
+  ['metrics_daily', 'ts_day'], ['metrics_hourly', 'ts_hour'],
+  ['metrics_minutely', 'ts_minute'], ['metrics', 'ts'],
+];
 
 async function getEarliestMetricsTs() {
   if (_earliestTsCache != null) return _earliestTsCache;
-  for (const [table, tsField] of [['metrics_daily', 'ts_day'], ['metrics_hourly', 'ts_hour'], ['metrics_minutely', 'ts_minute'], ['metrics', 'ts']]) {
-    const raw = await apiRaw(table, { order: 'asc', limit: 1 });
-    if (raw.data.length) {
-      _earliestTsCache = raw.data[0][tsField];
-      return _earliestTsCache;
+  if (_earliestTsPromise) return _earliestTsPromise; // already in flight - don't fire it again
+
+  _earliestTsPromise = (async () => {
+    // Fire all 4 lookups in parallel instead of stopping at the first
+    // non-empty result one round trip at a time - on a high-latency
+    // connection that's up to 4x slower for no reason, since we need to
+    // check every table's presence anyway in the worst case (fresh install).
+    const results = await Promise.all(
+      EARLIEST_TS_TABLES.map(([table]) => apiRaw(table, { order: 'asc', limit: 1 }))
+    );
+    for (let i = 0; i < EARLIEST_TS_TABLES.length; i++) {
+      const [, tsField] = EARLIEST_TS_TABLES[i];
+      if (results[i].data.length) {
+        _earliestTsCache = results[i].data[0][tsField];
+        return _earliestTsCache;
+      }
     }
-  }
-  _earliestTsCache = Math.floor(Date.now() / 1000) - RANGE_SECONDS['1d'];
-  return _earliestTsCache;
+    _earliestTsCache = Math.floor(Date.now() / 1000) - RANGE_SECONDS['1d'];
+    return _earliestTsCache;
+  })();
+
+  return _earliestTsPromise;
 }
 
 // Returns [from, to, resolution_s] for a range key or explicit window.
@@ -148,6 +201,19 @@ async function fetchAllRaw(table, { from, to, filter_col, filter_val } = {}) {
 function avgOf(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null; }
 
 async function fetchMetrics(range) {
+  const cached = _metricsMemo.get(range);
+  if (cached && Date.now() - cached.ts < METRICS_MEMO_TTL_MS) return cached.promise;
+  const promise = _fetchMetricsUncached(range);
+  _metricsMemo.set(range, { promise, ts: Date.now() });
+  try {
+    return await promise;
+  } catch (e) {
+    _metricsMemo.delete(range); // don't cache a failed request
+    throw e;
+  }
+}
+
+async function _fetchMetricsUncached(range) {
   const [from, to, resolution_s] = await resolveRange(range);
   let data;
 
@@ -175,11 +241,11 @@ async function fetchMetrics(range) {
     // Bucket minutely rows into wider buckets; fall back to metrics_hourly
     // before the oldest minutely row, then metrics_daily before the oldest
     // hourly row (see HOURLY_ROLLUP_DAYS in cleanup.py).
-    const minuteRows = await fetchAllRaw('metrics_minutely', { from, to });
-    const oldestMinute = (await apiRaw('metrics_minutely', { limit: 1, order: 'asc' })).data[0];
-    const oldestMinuteTs = oldestMinute ? oldestMinute.ts_minute : Infinity;
-    const oldestHour = (await apiRaw('metrics_hourly', { limit: 1, order: 'asc' })).data[0];
-    const oldestHourTs = oldestHour ? oldestHour.ts_hour : Infinity;
+    const [minuteRows, oldestMinuteTs, oldestHourTs] = await Promise.all([
+      fetchAllRaw('metrics_minutely', { from, to }),
+      _getOldestRow('metrics_minutely', 'ts_minute'),
+      _getOldestRow('metrics_hourly', 'ts_hour'),
+    ]);
 
     const buckets = new Map();
     const bucketOf = (ts) => {
@@ -286,10 +352,10 @@ async function fetchTraffic(range) {
     }
   } else {
     // Same cascade as fetchMetrics(): minutely -> hourly -> daily.
-    const oldestMinute = (await apiRaw('metrics_minutely', { limit: 1, order: 'asc' })).data[0];
-    const oldestMinuteTs = oldestMinute ? oldestMinute.ts_minute : Infinity;
-    const oldestHour = (await apiRaw('metrics_hourly', { limit: 1, order: 'asc' })).data[0];
-    const oldestHourTs = oldestHour ? oldestHour.ts_hour : Infinity;
+    const [oldestMinuteTs, oldestHourTs] = await Promise.all([
+      _getOldestRow('metrics_minutely', 'ts_minute'),
+      _getOldestRow('metrics_hourly', 'ts_hour'),
+    ]);
 
     const minuteRows = await fetchAllRaw('metrics_minutely', { from: Math.max(from, oldestMinuteTs), to });
     for (const r of minuteRows) addBytes(r.ts_minute, r.down_bytes, r.up_bytes);
@@ -499,19 +565,22 @@ async function fetchPeakStats(range) {
 // Admin delete (the metrics+metrics_minutely cascade is UI logic, so it lives here, not in the backend)
 // ---------------------------------------------------------------------------
 async function adminDelete(target, from_ts, to_ts) {
+  let result;
   if (target === 'metrics') {
     const [a, b] = await Promise.all([
       apiDeleteTable('metrics', from_ts, to_ts),
       apiDeleteTable('metrics_minutely', from_ts, to_ts),
     ]);
-    return { deleted: (a.deleted || 0) + (b.deleted || 0) };
-  }
-  if (target === 'all') {
+    result = { deleted: (a.deleted || 0) + (b.deleted || 0) };
+  } else if (target === 'all') {
     const tables = ['events', 'metrics', 'metrics_minutely', 'metrics_hourly', 'metrics_daily', 'speedtests', 'weather'];
     const results = await Promise.all(tables.map((t) => apiDeleteTable(t, from_ts, to_ts)));
     const deleted = {};
     tables.forEach((t, i) => { deleted[t] = results[i].deleted; });
-    return { deleted };
+    result = { deleted };
+  } else {
+    result = await apiDeleteTable(target, from_ts, to_ts);
   }
-  return apiDeleteTable(target, from_ts, to_ts);
+  _invalidateCaches();
+  return result;
 }
