@@ -48,14 +48,22 @@ STATIC_DIR = Path(__file__).parent / "static"
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "changeme")
 
+if ADMIN_PASS == "changeme":
+    logger.warning(
+        "ADMIN_PASS is still the default 'changeme' - change it in .env for production!"
+    )
+
 # Session auth replaces HTTP Basic (see login.html/login.js). SESSION_SECRET
-# should be set in .env; without it, a fallback is derived from the admin
-# credentials so sessions at least survive a process restart (logged as a
-# warning, since it's less secure than a dedicated random secret).
-SESSION_SECRET = os.environ.get("SESSION_SECRET")
+# MUST be set in .env. There is deliberately no fallback/default: deriving a
+# predictable key from the (also default) admin credentials would let anyone
+# forge valid session cookies and bypass auth on every /api/* route.
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip()
 if not SESSION_SECRET:
-    logger.warning("SESSION_SECRET not set - deriving a fallback. Set it in .env for production!")
-    SESSION_SECRET = hashlib.sha256(f"{ADMIN_USER}:{ADMIN_PASS}:starlink-monitor".encode()).hexdigest()
+    raise RuntimeError(
+        "SESSION_SECRET is not set or empty. Generate one (e.g. "
+        "`openssl rand -hex 32`) and set it in .env before starting. "
+        "Refusing to start with an insecure session signing key."
+    )
 
 COOKIE_NAME = "sm_session"
 SESSION_TTL_S = 12 * 3600  # 12h, then log in again

@@ -51,8 +51,17 @@ A lightweight, self-hosted web dashboard and telemetry collector designed to mon
 
 2. **Configure Environment Variables**
    ```bash
-   cp example.env .env
+   cp .env.example .env
    ```
+
+   > **Required:** `SESSION_SECRET` must be set to a random value before
+   > starting — the API refuses to start without it. Generate one with
+   > `openssl rand -hex 32` and set it in `.env`:
+   > ```bash
+   > openssl rand -hex 32
+   > # add the output as: SESSION_SECRET=<generated-value>
+   > ```
+   > Also change `ADMIN_PASS` from the default value.
 
 3. **Deploy with Docker Compose**
    ```bash
