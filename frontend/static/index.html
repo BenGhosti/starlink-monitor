@@ -4,9 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Starlink Monitor</title>
-<link rel="stylesheet" href="/static/style.css?v=3">
+<link rel="stylesheet" href="/static/style.css?v=4">
 <script defer src="/static/vendor/chart.umd.js"></script>
 <script defer src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script defer src="/static/vendor/html2canvas.min.js"></script>
 </head>
 <body>
 <div class="db">
@@ -14,8 +15,16 @@
   <!-- ============ TOPBAR ============ -->
   <div class="topbar">
     <span class="logo">Starlink Monitor</span>
+    <nav class="tabs" id="mainTabs">
+      <button class="tab-btn active" data-tab="overview">Overview</button>
+      <button class="tab-btn" data-tab="quality">Quality</button>
+      <button class="tab-btn" data-tab="data">Data</button>
+      <button class="tab-btn" data-tab="dish">Dish</button>
+      <button class="tab-btn" data-tab="history">History</button>
+    </nav>
     <div class="topbar-right">
       <span class="topbar-meta" id="topbarMeta">Unraid · Gigabit</span>
+      <button class="live-btn" id="snapshotBtn" title="Download dashboard as PNG">📷 Snapshot</button>
       <button class="admin-btn" id="adminBtn" title="Data Management">⚙</button>
       <button class="live-btn live-active" id="liveModeBtn" title="Toggle live mode">⏸ Pause</button>
       <span class="status-pill" id="connStatus"><span class="dot" id="connDot"></span><span id="connText">Connecting...</span></span>
@@ -76,264 +85,397 @@
     </div>
   </div>
 
-  <!-- ============ WEATHER BAR ============ -->
-  <div class="weather-bar" id="weatherBar">
-    <span class="weather-city" id="weatherCity">–</span>
-    <span style="color:#c8d6e5" id="weatherMain">–</span>
-    <span style="color:#4a6580" id="weatherExtra">–</span>
-    <span class="weather-warn" id="weatherWarn" style="display:none"></span>
-  </div>
+  <!-- ================================================================
+       TAB: OVERVIEW (core info)
+  ================================================================= -->
+  <div class="tab-page active" id="tab-overview">
 
-  <!-- ============ STAT TILES ============ -->
-  <div class="section-label">Overview · last 24 hours</div>
-  <div class="stat-row">
-    <div class="stat">
-      <div class="stat-label">Ping Drop</div>
-      <div class="stat-val ok" id="statDrop">– %</div>
+    <!-- Weather bar -->
+    <div class="weather-bar" id="weatherBar">
+      <span class="weather-city" id="weatherCity">–</span>
+      <span style="color:#c8d6e5" id="weatherMain">–</span>
+      <span style="color:#4a6580" id="weatherExtra">–</span>
+      <span class="weather-warn" id="weatherWarn" style="display:none"></span>
     </div>
-    <div class="stat">
-      <div class="stat-label">Latency</div>
-      <div class="stat-val blue" id="statLatency">– ms</div>
-    </div>
-    <div class="stat stat--wide">
-      <div class="stat-label">Throughput (live)</div>
-      <div class="stat-val-dual">
-        <span><span class="stat-val-sep">↓</span><span class="stat-val ok" id="statDownload">– Mbit/s</span></span>
-        <span><span class="stat-val-sep">↑</span><span class="stat-val blue" id="statUpload">– Mbit/s</span></span>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Outages 24h</div>
-      <div class="stat-val ok" id="statDisconnects">–</div>
-    </div>
-    <div class="stat">
-      <div class="stat-label">Uptime 24h</div>
-      <div class="stat-val blue" id="statUptime">–</div>
-    </div>
-  </div>
 
-  <!-- ============ PEAK VALUES (from 2s live samples) ============ -->
-  <div class="panel">
-    <div class="panel-title">
-      <span>Best Values · from live sampling (2s)</span>
-      <div class="range-btns" data-target="peak">
-        <span class="rb active" data-range="1d">Daily</span>
-        <span class="rb" data-range="7d">Weekly</span>
-        <span class="rb" data-range="1m">Monthly</span>
-        <span class="rb" data-range="3m">3 Months</span>
-        <span class="rb" data-range="6m">6 Months</span>
-        <span class="rb" data-range="12m">Yearly</span>
-        <span class="rb" data-range="all">All</span>
-      </div>
-    </div>
+    <!-- Stat tiles -->
+    <div class="section-label">Overview · last 24 hours</div>
     <div class="stat-row">
       <div class="stat">
-        <div class="stat-label">Best Latency</div>
-        <div class="stat-val blue" id="peakLatency">– ms</div>
+        <div class="stat-label">Ping Drop</div>
+        <div class="stat-val ok" id="statDrop">– %</div>
       </div>
       <div class="stat">
-        <div class="stat-label">Peak Download</div>
-        <div class="stat-val ok" id="peakDownload">– Mbit/s</div>
+        <div class="stat-label">Latency</div>
+        <div class="stat-val blue" id="statLatency">– ms</div>
       </div>
       <div class="stat">
-        <div class="stat-label">Peak Upload</div>
-        <div class="stat-val ok" id="peakUpload">– Mbit/s</div>
+        <div class="stat-label">Jitter</div>
+        <div class="stat-val ok" id="statJitter">– ms</div>
+      </div>
+      <div class="stat stat--wide">
+        <div class="stat-label">Throughput (live)</div>
+        <div class="stat-val-dual">
+          <span><span class="stat-val-sep">↓</span><span class="stat-val ok" id="statDownload">– Mbit/s</span></span>
+          <span><span class="stat-val-sep">↑</span><span class="stat-val blue" id="statUpload">– Mbit/s</span></span>
+        </div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Uptime 24h</div>
+        <div class="stat-val blue" id="statUptime">–</div>
+      </div>
+    </div>
+
+    <!-- Health score + Sky view -->
+    <div class="overview-grid">
+      <div class="panel health-panel">
+        <div class="panel-title">
+          <span>Dish Health Score</span>
+          <span style="color:#2a3d52;font-size:9px">weighted · 24h</span>
+        </div>
+        <div class="health-row">
+          <div class="health-gauge" id="healthGauge" style="--score:0;--health-color:#5ba3d0" title="">
+            <div class="health-gauge-inner">
+              <div class="health-score" id="healthScore">–</div>
+              <div class="health-score-label">/ 100</div>
+            </div>
+          </div>
+          <div class="health-meta">
+            <div class="health-breakdown" id="healthBreakdown">–</div>
+            <div class="health-outages">Outages 24h: <span id="healthOutages">–</span></div>
+            <div class="health-weights">Drop 30% · Latency 25% · Obstruction 20% · Uptime 15% · Alerts 10%</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <span>Sky View · Field of View</span>
+          <span style="color:#2a3d52;font-size:9px">N up · center=zenith · 90°=horizon</span>
+        </div>
+        <div class="dome-wrap">
+          <canvas id="domCanvas" width="220" height="220"></canvas>
+          <div class="dome-legend">
+            <span class="dome-legend-dot dome-legend-dot--dish"></span>Dish
+            <span class="dome-legend-dot" style="background:#e0566e;margin-left:10px"></span>
+            <span id="domeObstrLabel" style="color:#5a7390">Obstruction –</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent events -->
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title">
+        <span>Recent Events</span>
+        <span style="color:#2a3d52;font-size:9px">last 7 days</span>
+      </div>
+      <div class="event-list event-list-compact" id="recentEventList">
+        <div class="event-empty">Loading events...</div>
       </div>
     </div>
   </div>
 
-  <!-- ============ MAIN CHARTS (Ping Drop + Latency) ============ -->
-  <div class="section-label">Connection Quality</div>
-  <div class="main-grid">
-    <div class="panel">
+  <!-- ================================================================
+       TAB: QUALITY (line charts + weather correlation)
+  ================================================================= -->
+  <div class="tab-page" id="tab-quality">
+    <div class="section-label">Connection Quality</div>
+    <div class="main-grid">
+      <div class="panel">
+        <div class="panel-title">
+          <span>Ping Drop · live</span>
+          <div class="range-btns" data-target="drop">
+            <span class="rb active" data-range="1d">1d</span>
+            <span class="rb" data-range="7d">7d</span>
+            <span class="rb" data-range="14d">14d</span>
+            <span class="rb" data-range="1m">1m</span>
+            <span class="rb" data-range="6m">6m</span>
+            <span class="rb" data-range="12m">12m</span>
+            <span class="rb" data-range="all">all</span>
+          </div>
+        </div>
+        <div class="chart-area chart-area-tall">
+          <canvas id="dropChart"></canvas>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <span>Latency · live</span>
+          <div class="range-btns" data-target="latency">
+            <span class="rb active" data-range="1d">1d</span>
+            <span class="rb" data-range="7d">7d</span>
+            <span class="rb" data-range="14d">14d</span>
+            <span class="rb" data-range="1m">1m</span>
+            <span class="rb" data-range="6m">6m</span>
+            <span class="rb" data-range="12m">12m</span>
+            <span class="rb" data-range="all">all</span>
+          </div>
+        </div>
+        <div class="chart-area chart-area-tall">
+          <canvas id="latencyChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="main-grid">
+      <div class="panel">
+        <div class="panel-title">
+          <span>Jitter · live</span>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span id="jitterBasis" style="font-size:9px;color:#3a5070">Basis: 2s</span>
+            <div class="range-btns" data-target="jitter">
+              <span class="rb active" data-range="1d">1d</span>
+              <span class="rb" data-range="7d">7d</span>
+              <span class="rb" data-range="14d">14d</span>
+              <span class="rb" data-range="1m">1m</span>
+              <span class="rb" data-range="6m">6m</span>
+              <span class="rb" data-range="12m">12m</span>
+              <span class="rb" data-range="all">all</span>
+            </div>
+          </div>
+        </div>
+        <div class="chart-area chart-area-tall">
+          <canvas id="jitterChart"></canvas>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">
+          <span>Throughput (Down/Up) · live</span>
+          <div class="range-btns" data-target="throughput">
+            <span class="rb active" data-range="1d">1d</span>
+            <span class="rb" data-range="7d">7d</span>
+            <span class="rb" data-range="14d">14d</span>
+            <span class="rb" data-range="1m">1m</span>
+            <span class="rb" data-range="6m">6m</span>
+            <span class="rb" data-range="12m">12m</span>
+            <span class="rb" data-range="all">all</span>
+          </div>
+        </div>
+        <div class="chart-area chart-area-tall">
+          <canvas id="throughputChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Weather correlation -->
+    <div class="panel" style="margin-bottom:18px">
       <div class="panel-title">
-        <span>Ping Drop · live</span>
-        <div class="range-btns" data-target="drop">
-          <span class="rb active" data-range="1d">1d</span>
-          <span class="rb" data-range="7d">7d</span>
-          <span class="rb" data-range="14d">14d</span>
-          <span class="rb" data-range="1m">1m</span>
-          <span class="rb" data-range="6m">6m</span>
-          <span class="rb" data-range="12m">12m</span>
-          <span class="rb" data-range="all">all</span>
+        <span>Weather Correlation</span>
+        <span style="color:#3a5070;font-size:9px">yellow bands in the latency chart = active weather warning</span>
+      </div>
+      <div class="insight-strip" id="weatherInsight">
+        <span class="event-empty">Loading weather correlation...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       TAB: DATA (speedtest, traffic, peak values)
+  ================================================================= -->
+  <div class="tab-page" id="tab-data">
+
+    <div class="section-label">Peak Values · from live sampling (2s)</div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title">
+        <span>Best Values</span>
+        <div class="range-btns" data-target="peak">
+          <span class="rb active" data-range="1d">Daily</span>
+          <span class="rb" data-range="7d">Weekly</span>
+          <span class="rb" data-range="1m">Monthly</span>
+          <span class="rb" data-range="3m">3 Months</span>
+          <span class="rb" data-range="6m">6 Months</span>
+          <span class="rb" data-range="12m">Yearly</span>
+          <span class="rb" data-range="all">All</span>
+        </div>
+      </div>
+      <div class="stat-row">
+        <div class="stat">
+          <div class="stat-label">Best Latency</div>
+          <div class="stat-val blue" id="peakLatency">– ms</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Peak Download</div>
+          <div class="stat-val ok" id="peakDownload">– Mbit/s</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Peak Upload</div>
+          <div class="stat-val ok" id="peakUpload">– Mbit/s</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Speedtest (every 8 hours)</div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title">
+        <span>Download / Upload per Test</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span id="speedtestCount" style="font-size:9px;color:#3a5070"></span>
+          <div class="range-btns" data-target="speedtest">
+            <span class="rb" data-range="1d">1d</span>
+            <span class="rb" data-range="7d">7d</span>
+            <span class="rb" data-range="14d">14d</span>
+            <span class="rb" data-range="1m">1m</span>
+            <span class="rb" data-range="6m">6m</span>
+            <span class="rb" data-range="12m">12m</span>
+            <span class="rb active" data-range="all">all</span>
+          </div>
         </div>
       </div>
       <div class="chart-area chart-area-tall">
-        <canvas id="dropChart"></canvas>
+        <canvas id="speedtestChart"></canvas>
       </div>
     </div>
 
-    <div class="panel">
+    <div class="section-label">Data Volume (sent/received)</div>
+    <div class="panel" style="margin-bottom:18px">
       <div class="panel-title">
-        <span>Latency · live</span>
-        <div class="range-btns" data-target="latency">
-          <span class="rb active" data-range="1d">1d</span>
-          <span class="rb" data-range="7d">7d</span>
-          <span class="rb" data-range="14d">14d</span>
-          <span class="rb" data-range="1m">1m</span>
-          <span class="rb" data-range="6m">6m</span>
-          <span class="rb" data-range="12m">12m</span>
-          <span class="rb" data-range="all">all</span>
+        <span>Download / Upload Volume</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span id="trafficTotal" style="font-size:9px;color:#3a5070"></span>
+          <div class="range-btns" data-target="traffic">
+            <span class="rb" data-range="1d">1d</span>
+            <span class="rb active" data-range="7d">7d</span>
+            <span class="rb" data-range="14d">14d</span>
+            <span class="rb" data-range="1m">1m</span>
+            <span class="rb" data-range="6m">6m</span>
+            <span class="rb" data-range="12m">12m</span>
+            <span class="rb" data-range="all">all</span>
+          </div>
         </div>
       </div>
       <div class="chart-area chart-area-tall">
-        <canvas id="latencyChart"></canvas>
+        <canvas id="trafficChart"></canvas>
       </div>
     </div>
   </div>
 
-  <div class="main-grid">
-    <div class="panel">
+  <!-- ================================================================
+       TAB: DISH (hardware status)
+  ================================================================= -->
+  <div class="tab-page" id="tab-dish">
+    <div class="section-label">Dish Status</div>
+    <div class="dish-grid">
+      <div class="panel dish-panel">
+        <div class="panel-title"><span>Orientation</span></div>
+        <div class="compass-wrap">
+          <svg id="compassSvg" viewBox="0 0 160 160" width="100" height="100" class="compass" preserveAspectRatio="xMidYMid meet">
+            <circle cx="80" cy="80" r="70" class="compass-ring"></circle>
+            <circle cx="80" cy="80" r="45" class="compass-ring-inner"></circle>
+            <text x="80" y="16" class="compass-label" text-anchor="middle">N</text>
+            <text x="148" y="84" class="compass-label" text-anchor="middle">E</text>
+            <text x="80" y="150" class="compass-label" text-anchor="middle">S</text>
+            <text x="12" y="84" class="compass-label" text-anchor="middle">W</text>
+            <line id="compassNeedle" x1="80" y1="80" x2="80" y2="20" class="compass-needle"></line>
+            <circle cx="80" cy="80" r="4" class="compass-hub"></circle>
+          </svg>
+          <div class="compass-readout">
+            <div><span class="compass-readout-label">Azimuth</span><span id="dishAzimuth">– °</span></div>
+            <div><span class="compass-readout-label">Elevation</span><span id="dishElevation">– °</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel dish-panel">
+        <div class="panel-title"><span>Device Info</span></div>
+        <div class="info-rows">
+          <div class="info-row"><span>Device ID</span><span id="dishDeviceId">–</span></div>
+          <div class="info-row"><span>Hardware</span><span id="dishHardware">–</span></div>
+          <div class="info-row"><span>Software</span><span id="dishSoftware">–</span></div>
+          <div class="info-row"><span>Uptime</span><span id="dishUptime">–</span></div>
+          <div class="info-row"><span>Status</span><span id="dishState">–</span></div>
+        </div>
+      </div>
+
+      <div class="panel dish-panel">
+        <div class="panel-title"><span>GPS &amp; Signal</span></div>
+        <div class="info-rows">
+          <div class="info-row"><span>GPS Ready</span><span id="gpsReady">–</span></div>
+          <div class="info-row"><span>GPS Enabled</span><span id="gpsEnabled">–</span></div>
+          <div class="info-row"><span>Satellites</span><span id="gpsSats">–</span></div>
+          <div class="info-row"><span>SNR OK</span><span id="snrOk">–</span></div>
+        </div>
+      </div>
+
+      <div class="panel dish-panel">
+        <div class="panel-title"><span>Obstruction</span></div>
+        <div class="info-rows">
+          <div class="info-row"><span>Currently Obstructed</span><span id="obstrCurrent">–</span></div>
+          <div class="info-row"><span>Obstructed Fraction</span><span id="obstrFraction">–</span></div>
+          <div class="info-row"><span>Avg. Duration</span><span id="obstrDuration">–</span></div>
+          <div class="info-row"><span>Avg. Interval</span><span id="obstrInterval">–</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
       <div class="panel-title">
-        <span>Throughput (Down/Up) · live</span>
-        <div class="range-btns" data-target="throughput">
-          <span class="rb active" data-range="1d">1d</span>
-          <span class="rb" data-range="7d">7d</span>
-          <span class="rb" data-range="14d">14d</span>
-          <span class="rb" data-range="1m">1m</span>
-          <span class="rb" data-range="6m">6m</span>
-          <span class="rb" data-range="12m">12m</span>
-          <span class="rb" data-range="all">all</span>
-        </div>
+        <span>Device Alerts</span>
+        <span id="alertSummary" style="color:#2a3d52;font-size:9px"></span>
       </div>
-      <div class="chart-area chart-area-tall">
-        <canvas id="throughputChart"></canvas>
+      <div class="alert-grid" id="alertGrid">
+        <div class="event-empty">Loading alerts...</div>
       </div>
     </div>
+  </div>
 
-    <div class="panel">
+  <!-- ================================================================
+       TAB: HISTORY (SLA stats + event log)
+  ================================================================= -->
+  <div class="tab-page" id="tab-history">
+    <div class="section-label">SLA & Reliability</div>
+    <div class="panel" style="margin-bottom:12px">
       <div class="panel-title">
-        <span>Sky View · Field of View</span>
-        <span style="color:#2a3d52;font-size:9px">N up · center=zenith · 90°=horizon</span>
+        <span>Reliability Statistics</span>
+        <span style="color:#2a3d52;font-size:9px">computed from disconnect events · all time</span>
       </div>
-      <div class="dome-wrap">
-        <canvas id="domCanvas" width="220" height="220"></canvas>
-        <div class="dome-legend">
-          <span class="dome-legend-dot dome-legend-dot--dish"></span>Dish
-          <span class="dome-legend-dot" style="background:#e0566e;margin-left:10px"></span>
-          <span id="domeObstrLabel" style="color:#5a7390">Obstruction –</span>
+      <div class="sla-cards">
+        <div class="stat">
+          <div class="stat-label">Total Outages</div>
+          <div class="stat-val blue" id="slaOutages">–</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Longest Outage</div>
+          <div class="stat-val err" id="slaLongest">–</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">MTBF</div>
+          <div class="stat-val blue" id="slaMtbf">–</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Total Downtime</div>
+          <div class="stat-val ok" id="slaDowntime">–</div>
         </div>
       </div>
-    </div>
-  </div>
-
-  <!-- ============ SPEEDTEST ============ -->
-  <div class="section-label">Speedtest (every 8 hours)</div>
-  <div class="panel" style="margin-bottom:18px">
-    <div class="panel-title">
-      <span>Download / Upload per Test</span>
-      <div style="display:flex;align-items:center;gap:10px">
-        <span id="speedtestCount" style="font-size:9px;color:#3a5070"></span>
-        <div class="range-btns" data-target="speedtest">
-          <span class="rb" data-range="1d">1d</span>
-          <span class="rb" data-range="7d">7d</span>
-          <span class="rb" data-range="14d">14d</span>
-          <span class="rb" data-range="1m">1m</span>
-          <span class="rb" data-range="6m">6m</span>
-          <span class="rb" data-range="12m">12m</span>
-          <span class="rb active" data-range="all">all</span>
+      <div class="sla-grid">
+        <div>
+          <div class="sla-sub-label">Monthly Uptime</div>
+          <table class="sla-table">
+            <thead>
+              <tr><th>Month</th><th>Downtime</th><th>Uptime</th></tr>
+            </thead>
+            <tbody id="slaTableBody">
+              <tr><td colspan="3" class="event-empty">Loading...</td></tr>
+            </tbody>
+          </table>
         </div>
-      </div>
-    </div>
-    <div class="chart-area chart-area-tall">
-      <canvas id="speedtestChart"></canvas>
-    </div>
-  </div>
-
-  <!-- ============ TRAFFIC / DATA VOLUME ============ -->
-  <div class="section-label">Data Volume (sent/received)</div>
-  <div class="panel" style="margin-bottom:18px">
-    <div class="panel-title">
-      <span>Download / Upload Volume</span>
-      <div style="display:flex;align-items:center;gap:10px">
-        <span id="trafficTotal" style="font-size:9px;color:#3a5070"></span>
-        <div class="range-btns" data-target="traffic">
-          <span class="rb" data-range="1d">1d</span>
-          <span class="rb active" data-range="7d">7d</span>
-          <span class="rb" data-range="14d">14d</span>
-          <span class="rb" data-range="1m">1m</span>
-          <span class="rb" data-range="6m">6m</span>
-          <span class="rb" data-range="12m">12m</span>
-          <span class="rb" data-range="all">all</span>
-        </div>
-      </div>
-    </div>
-    <div class="chart-area chart-area-tall">
-      <canvas id="trafficChart"></canvas>
-    </div>
-  </div>
-
-  <!-- ============ DISH STATUS ============ -->
-  <div class="section-label">Dish Status</div>
-  <div class="dish-grid">
-    <div class="panel dish-panel">
-      <div class="panel-title"><span>Orientation</span></div>
-      <div class="compass-wrap">
-        <svg id="compassSvg" viewBox="0 0 160 160" width="100" height="100" class="compass" preserveAspectRatio="xMidYMid meet">
-          <circle cx="80" cy="80" r="70" class="compass-ring"></circle>
-          <circle cx="80" cy="80" r="45" class="compass-ring-inner"></circle>
-          <text x="80" y="16" class="compass-label" text-anchor="middle">N</text>
-          <text x="148" y="84" class="compass-label" text-anchor="middle">E</text>
-          <text x="80" y="150" class="compass-label" text-anchor="middle">S</text>
-          <text x="12" y="84" class="compass-label" text-anchor="middle">W</text>
-          <line id="compassNeedle" x1="80" y1="80" x2="80" y2="20" class="compass-needle"></line>
-          <circle cx="80" cy="80" r="4" class="compass-hub"></circle>
-        </svg>
-        <div class="compass-readout">
-          <div><span class="compass-readout-label">Azimuth</span><span id="dishAzimuth">– °</span></div>
-          <div><span class="compass-readout-label">Elevation</span><span id="dishElevation">– °</span></div>
+        <div>
+          <div class="sla-sub-label">Outages by local hour</div>
+          <div class="chart-area chart-area-small">
+            <canvas id="slaHourChart"></canvas>
+          </div>
         </div>
       </div>
     </div>
 
-    <div class="panel dish-panel">
-      <div class="panel-title"><span>Device Info</span></div>
-      <div class="info-rows">
-        <div class="info-row"><span>Device ID</span><span id="dishDeviceId">–</span></div>
-        <div class="info-row"><span>Hardware</span><span id="dishHardware">–</span></div>
-        <div class="info-row"><span>Software</span><span id="dishSoftware">–</span></div>
-        <div class="info-row"><span>Uptime</span><span id="dishUptime">–</span></div>
-        <div class="info-row"><span>Status</span><span id="dishState">–</span></div>
+    <div class="section-label">Event Log</div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title"><span>Last 7 Days</span></div>
+      <div class="event-list" id="eventList">
+        <div class="event-empty">Loading events...</div>
       </div>
-    </div>
-
-    <div class="panel dish-panel">
-      <div class="panel-title"><span>GPS &amp; Signal</span></div>
-      <div class="info-rows">
-        <div class="info-row"><span>GPS Ready</span><span id="gpsReady">–</span></div>
-        <div class="info-row"><span>GPS Enabled</span><span id="gpsEnabled">–</span></div>
-        <div class="info-row"><span>Satellites</span><span id="gpsSats">–</span></div>
-        <div class="info-row"><span>SNR OK</span><span id="snrOk">–</span></div>
-      </div>
-    </div>
-
-    <div class="panel dish-panel">
-      <div class="panel-title"><span>Obstruction</span></div>
-      <div class="info-rows">
-        <div class="info-row"><span>Currently Obstructed</span><span id="obstrCurrent">–</span></div>
-        <div class="info-row"><span>Obstructed Fraction</span><span id="obstrFraction">–</span></div>
-        <div class="info-row"><span>Avg. Duration</span><span id="obstrDuration">–</span></div>
-        <div class="info-row"><span>Avg. Interval</span><span id="obstrInterval">–</span></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="panel" style="margin-bottom:18px">
-    <div class="panel-title">
-      <span>Device Alerts</span>
-      <span id="alertSummary" style="color:#2a3d52;font-size:9px"></span>
-    </div>
-    <div class="alert-grid" id="alertGrid">
-      <div class="event-empty">Loading alerts...</div>
-    </div>
-  </div>
-
-  <!-- ============ EVENT LOG ============ -->
-  <div class="section-label">Event Log</div>
-  <div class="panel" style="margin-bottom:12px">
-    <div class="panel-title"><span>Last 7 Days</span></div>
-    <div class="event-list" id="eventList">
-      <div class="event-empty">Loading events...</div>
     </div>
   </div>
 
@@ -346,7 +488,7 @@
 
 </div>
 
-<script defer src="/static/api-client.js?v=3"></script>
-<script defer src="/static/dashboard.js?v=3"></script>
+<script defer src="/static/api-client.js?v=4"></script>
+<script defer src="/static/dashboard.js?v=4"></script>
 </body>
 </html>

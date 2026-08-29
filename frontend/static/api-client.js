@@ -357,10 +357,11 @@ async function fetchTraffic(range) {
       _getOldestRow('metrics_hourly', 'ts_hour'),
     ]);
 
-    const minuteRows = await fetchAllRaw('metrics_minutely', { from: Math.max(from, oldestMinuteTs), to });
+    const minuteFrom = Number.isFinite(oldestMinuteTs) ? Math.max(from, oldestMinuteTs) : from;
+    const minuteRows = await fetchAllRaw('metrics_minutely', { from: minuteFrom, to });
     for (const r of minuteRows) addBytes(r.ts_minute, r.down_bytes, r.up_bytes);
 
-    if (from < oldestMinuteTs) {
+    if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
       const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
       for (const r of hourRows) {
         if (r.ts_hour >= oldestMinuteTs) continue;
@@ -490,14 +491,16 @@ async function fetchStatsSummary() {
     apiRaw('speedtests', { order: 'desc', limit: 1 }),
   ]);
 
-  let lat, drop;
+  let lat, drop, obstr;
   if (minuteRows.length) {
     lat = minuteRows.filter((m) => m.avg_ping_latency_ms != null).map((m) => m.avg_ping_latency_ms);
     drop = minuteRows.filter((m) => m.avg_ping_drop_rate != null).map((m) => m.avg_ping_drop_rate);
+    obstr = minuteRows.filter((m) => m.avg_obstr_fraction != null).map((m) => m.avg_obstr_fraction);
   } else {
     const rawRows = await fetchAllRaw('metrics', { from: dayAgo, to: now });
     lat = rawRows.filter((m) => m.ping_latency_ms != null && m.ping_latency_ms > 0).map((m) => m.ping_latency_ms);
     drop = rawRows.filter((m) => m.ping_drop_rate != null).map((m) => m.ping_drop_rate);
+    obstr = rawRows.filter((m) => m.obstr_fraction != null).map((m) => m.obstr_fraction);
   }
 
   // Only the part of each (ended) event inside the 24h window counts - an
@@ -525,6 +528,16 @@ async function fetchStatsSummary() {
     }
   }
 
+  // Active hardware alert count from the latest alerts_bitfield (same
+  // bit mapping as dashboard.js ALERT_BITS) - feeds the Dish Health Score.
+  const bitfield = latestRaw.data[0]?.alerts_bitfield;
+  let activeAlerts = 0;
+  if (bitfield != null) {
+    for (let b = 0; b < 12; b++) {
+      if (bitfield & (1 << b)) activeAlerts++;
+    }
+  }
+
   const totalDowntimeS = endedDowntimeS + ongoingDowntimeS;
   let uptimePct = 100.0;
   if (totalDowntimeS) uptimePct = Math.max(0, 100 - (totalDowntimeS / 86400) * 100);
@@ -532,6 +545,8 @@ async function fetchStatsSummary() {
   return {
     avg_latency_ms_24h: avgOf(lat),
     avg_drop_rate_24h: avgOf(drop),
+    avg_obstr_fraction_24h: avgOf(obstr),
+    active_alerts: activeAlerts,
     disconnects_24h: disconnectRows.length + (ongoingDowntimeS > 0 ? 1 : 0),
     uptime_pct_24h: Math.round(uptimePct * 1000) / 1000,
     last_speedtest: lastSpeedtestRaw.data[0] || null,
@@ -567,11 +582,12 @@ async function _fetchMetricsRowsForCsv(range) {
     }
   } else if (tier === 'minutely') {
     const oldestMinuteTs = await _getOldestRow('metrics_minutely', 'ts_minute');
-    const min = await fetchAllRaw('metrics_minutely', { from: Math.max(from, oldestMinuteTs), to });
+    const minFrom = Number.isFinite(oldestMinuteTs) ? Math.max(from, oldestMinuteTs) : from;
+    const min = await fetchAllRaw('metrics_minutely', { from: minFrom, to });
     for (const r of min) {
       rows.push({ kind: 'metric_min', ts: r.ts_minute, drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction, down: r.avg_downlink_bps, up: r.avg_uplink_bps });
     }
-    if (from < oldestMinuteTs) {
+    if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
       const hrs = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
       for (const r of hrs) {
         if (r.ts_hour >= oldestMinuteTs) continue;
@@ -580,11 +596,12 @@ async function _fetchMetricsRowsForCsv(range) {
     }
   } else {
     const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
-    const hrs = await fetchAllRaw('metrics_hourly', { from: Math.max(from, oldestHourTs), to });
+    const hourFrom = Number.isFinite(oldestHourTs) ? Math.max(from, oldestHourTs) : from;
+    const hrs = await fetchAllRaw('metrics_hourly', { from: hourFrom, to });
     for (const r of hrs) {
       rows.push({ kind: 'metric_hour', ts: r.ts_hour, drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction, down: r.avg_downlink_bps, up: r.avg_uplink_bps });
     }
-    if (from < oldestHourTs) {
+    if (Number.isFinite(oldestHourTs) && from < oldestHourTs) {
       const days = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
       for (const r of days) {
         if (r.ts_day >= oldestHourTs) continue;
@@ -652,6 +669,210 @@ async function fetchPeakStats(range) {
     best_latency_ms: bestLatencyMs,
     peak_download_bps: peakDownloadBps,
     peak_upload_bps: peakUploadBps,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Jitter: mean |Δ| between consecutive latency samples, computed at runtime
+// (no schema change). True jitter needs the raw 2s samples, so 1d uses those
+// exactly. Longer ranges approximate with |Δ| between consecutive
+// minute/hour/day averages - the UI labels the basis. Deltas across gaps
+// bigger than the entry's tolerance (e.g. an outage) break the chain: that's
+// downtime, not jitter.
+// ---------------------------------------------------------------------------
+const JITTER_TOL_S = { raw: 15, minute: 300, hour: 7200, day: 3 * 86400 };
+const JITTER_BASIS_LABEL = { raw: '2s samples', minute: 'minute avg', hour: 'hour avg', day: 'day avg' };
+
+async function fetchJitter(range) {
+  const [from, to] = await resolveRange(range);
+  const span = Math.max(1, to - from);
+  const bucketS = Math.max(120, Math.ceil(span / TARGET_POINTS));
+  const buckets = new Map();
+  const entries = []; // { ts, lat, basis } chronological
+
+  if (range === '1d') {
+    const rows = await fetchAllRaw('metrics', { from, to });
+    for (const r of rows) {
+      if (r.ping_latency_ms != null && r.ping_latency_ms > 0) {
+        entries.push({ ts: r.ts, lat: r.ping_latency_ms, basis: 'raw' });
+      }
+    }
+  } else {
+    const oldestMinuteTs = await _getOldestRow('metrics_minutely', 'ts_minute');
+    const minFrom = Number.isFinite(oldestMinuteTs) ? Math.max(from, oldestMinuteTs) : from;
+    const minRows = await fetchAllRaw('metrics_minutely', { from: minFrom, to });
+    for (const r of minRows) {
+      if (r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
+        entries.push({ ts: r.ts_minute, lat: r.avg_ping_latency_ms, basis: 'minute' });
+      }
+    }
+    if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
+      const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
+      const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
+      for (const r of hourRows) {
+        if (r.ts_hour < oldestMinuteTs && r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
+          entries.push({ ts: r.ts_hour, lat: r.avg_ping_latency_ms, basis: 'hour' });
+        }
+      }
+      if (Number.isFinite(oldestHourTs) && from < oldestHourTs) {
+        const dayRows = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
+        for (const r of dayRows) {
+          if (r.ts_day < oldestHourTs && r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
+            entries.push({ ts: r.ts_day, lat: r.avg_ping_latency_ms, basis: 'day' });
+          }
+        }
+      }
+    }
+  }
+
+  entries.sort((a, b) => a.ts - b.ts);
+
+  let coarsest = 'raw';
+  let prev = null;
+  for (const e of entries) {
+    if (prev != null && e.ts - prev.ts <= JITTER_TOL_S[e.basis]) {
+      const bTs = Math.floor(e.ts / bucketS) * bucketS;
+      const b = buckets.get(bTs) || { s: 0, n: 0 };
+      b.s += Math.abs(e.lat - prev.lat);
+      b.n++;
+      buckets.set(bTs, b);
+    }
+    if (JITTER_TOL_S[e.basis] > JITTER_TOL_S[coarsest]) coarsest = e.basis;
+    prev = e;
+  }
+
+  const data = Array.from(buckets.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([ts, b]) => ({ x: ts * 1000, y: b.n ? b.s / b.n : null }));
+
+  return { from, to, basis: coarsest, basis_label: JITTER_BASIS_LABEL[coarsest], data };
+}
+
+// ---------------------------------------------------------------------------
+// Weather: warning intervals + correlation insight (runtime, no schema change)
+// ---------------------------------------------------------------------------
+
+// Consecutive weather rows with an active warning (≤30min apart) merge into
+// one interval, padded ±10min so the band visibly brackets the event.
+async function fetchWeatherWarningIntervals(range) {
+  const [from, to] = await resolveRange(range);
+  const weatherRows = await fetchAllRaw('weather', { from, to });
+  const intervals = [];
+  let cur = null;
+  for (const w of weatherRows) {
+    const t = w.ts * 1000;
+    if (w.warning) {
+      if (!cur) cur = { from: t - 600000, to: t + 600000 };
+      else if (t - cur.to <= 1800000) cur.to = t + 600000;
+      else { intervals.push(cur); cur = { from: t - 600000, to: t + 600000 }; }
+    } else if (cur) {
+      intervals.push(cur);
+      cur = null;
+    }
+  }
+  if (cur) intervals.push(cur);
+  return intervals;
+}
+
+// Compares latency/drop while a weather warning was active vs. normal
+// conditions. Uses minutely rows for ranges ≤30d, hourly (+daily fallback)
+// beyond so an 'all'-range fetch stays cheap.
+async function fetchWeatherCorrelation(range) {
+  const [from, to] = await resolveRange(range);
+  const intervals = await fetchWeatherWarningIntervals(range);
+  const useHourly = (to - from) > 30 * 86400;
+
+  const points = [];
+  if (useHourly) {
+    const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
+    const hourFrom = Number.isFinite(oldestHourTs) ? Math.max(from, oldestHourTs) : from;
+    const hrs = await fetchAllRaw('metrics_hourly', { from: hourFrom, to });
+    points.push(...hrs.map((r) => ({ ts: r.ts_hour, lat: r.avg_ping_latency_ms, drop: r.avg_ping_drop_rate })));
+    if (Number.isFinite(oldestHourTs) && from < oldestHourTs) {
+      const days = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
+      for (const r of days) {
+        if (r.ts_day < oldestHourTs) points.push({ ts: r.ts_day, lat: r.avg_ping_latency_ms, drop: r.avg_ping_drop_rate });
+      }
+    }
+  } else {
+    const mins = await fetchAllRaw('metrics_minutely', { from, to });
+    points.push(...mins.map((r) => ({ ts: r.ts_minute, lat: r.avg_ping_latency_ms, drop: r.avg_ping_drop_rate })));
+  }
+
+  const inWarn = (tsMs) => {
+    for (const i of intervals) {
+      if (tsMs >= i.from && tsMs <= i.to) return true;
+    }
+    return false;
+  };
+
+  const inLat = [], outLat = [], inDrop = [], outDrop = [];
+  for (const p of points) {
+    const warn = inWarn(p.ts * 1000);
+    if (p.lat != null && p.lat > 0) (warn ? inLat : outLat).push(p.lat);
+    if (p.drop != null) (warn ? inDrop : outDrop).push(p.drop);
+  }
+
+  return {
+    hours_warned: intervals.reduce((s, i) => s + (i.to - i.from), 0) / 3600000,
+    avg_lat_in: avgOf(inLat),
+    avg_lat_out: avgOf(outLat),
+    avg_drop_in: avgOf(inDrop),
+    avg_drop_out: avgOf(outDrop),
+    samples_in: inLat.length,
+    samples_out: outLat.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SLA statistics from the events table (runtime, no schema change)
+// ---------------------------------------------------------------------------
+async function fetchSlaStats() {
+  const now = Math.floor(Date.now() / 1000);
+  const [from] = await resolveRange('all');
+  const events = await fetchAllRaw('events', { from, to: now, filter_col: 'type', filter_val: 'disconnect' });
+
+  const months = new Map(); // 'YYYY-MM' -> downS
+  const hourHist = new Array(24).fill(0);
+  let longestS = 0, totalDownS = 0;
+
+  for (const e of events) {
+    const d = e.duration_s || 0;
+    totalDownS += d;
+    if (d > longestS) longestS = d;
+    const end = new Date(e.ts * 1000);
+    const key = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}`;
+    months.set(key, (months.get(key) || 0) + d);
+    hourHist[new Date((e.ts - d) * 1000).getHours()]++;
+  }
+
+  const nowDate = new Date(now * 1000);
+  const nowKey = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}`;
+  const monthRows = [];
+  for (const [key, downS] of months) {
+    const [y, m] = key.split('-').map(Number);
+    const isCurrent = key === nowKey;
+    const totalS = isCurrent
+      ? Math.max(1, now - new Date(y, m - 1, 1).getTime() / 1000)
+      : new Date(y, m, 0).getDate() * 86400;
+    monthRows.push({
+      month: `${String(m).padStart(2, '0')}.${y}`,
+      down_s: downS,
+      up_pct: Math.max(0, Math.min(100, 100 - (downS / totalS) * 100)),
+    });
+  }
+  monthRows.sort((a, b) => (a.month < b.month ? -1 : 1));
+
+  const historySpanS = Math.max(1, now - from);
+  const mtbfS = (historySpanS - totalDownS) / Math.max(1, events.length);
+
+  return {
+    months: monthRows,
+    total_outages: events.length,
+    longest_s: longestS,
+    total_down_s: totalDownS,
+    mtbf_s: mtbfS,
+    hour_hist: hourHist,
   };
 }
 

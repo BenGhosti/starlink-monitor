@@ -7,10 +7,16 @@ A lightweight, self-hosted web dashboard and telemetry collector designed to mon
 ## 📊 Features
 
 ### Real-Time Dashboard
-* **Live Telemetry:** 2-second sampling rate for instant updates on **Ping Drop (%)**, **Latency (ms)**, and **Live Throughput (Mbit/s)**.
+* **Live Telemetry:** 2-second sampling rate for instant updates on **Ping Drop (%)**, **Latency (ms)**, **Jitter (ms)** and **Live Throughput (Mbit/s)**.
+* **Jitter Analysis:** Live jitter from the 2s latency samples plus retroactive jitter across the whole history (2s-exact for recent data, minute/hour-based approximations labeled in the UI for older ranges).
+* **Dish Health Score:** Weighted 0-100 score (drop 30 %, latency 25 %, obstruction 20 %, uptime 15 %, alerts 10 %) with a per-factor breakdown.
+* **Weather Correlation:** Active weather warnings drawn as bands on the latency chart, plus a "latency/drop during storm vs. normal" insight card.
+* **SLA & Reliability:** Monthly uptime table, longest outage, MTBF and outage distribution by local hour - all computed at runtime from stored events.
+* **Snapshot Export:** One-click PNG download of the current dashboard view.
 * **Sky View:** Visualizes the dish orientation (Azimuth & Elevation, North-oriented, center = zenith) together with the live obstruction fraction reported by the dish.
 * **Dish Hardware Telemetry:** Tracks physical orientation (Azimuth & Elevation), GPS status, SNR metrics, and hardware-level alarms.
 * **Outage Statistics:** Calculates 24-hour uptime, historical peaks, and tracks average obstruction durations/intervals.
+* **Tabbed Layout:** Core info on the Overview page; Quality, Data, Dish and History behind tabs.
 
 ### Data & Architecture
 * **gRPC Collector:** Highly efficient Python background worker utilizing Starlink's native gRPC interface.
