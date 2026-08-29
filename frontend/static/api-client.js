@@ -1,27 +1,11 @@
-/* api-client.js - data layer between the generic backend and dashboard.js.
- * The backend (api.py) only serves raw, filtered table rows. All display/
- * aggregation logic (range->resolution, bucketing, stats, CSV) lives here.
- * See BACKEND_GUIDE.md for the backend's side of the contract.
- */
-
 const MAX_LIMIT = 50000;
 
-// Every range targets the same point count; resolution (seconds/point) is
-// derived dynamically from the span (span / TARGET_POINTS) instead of being
-// hardcoded per range.
 const TARGET_POINTS = 300;
-const RAW_METRICS_INTERVAL_S = 2;      // collector poll interval (metrics_collector.py)
-const RAW_SPEEDTEST_INTERVAL_S = 8 * 3600; // speedtest_runner.py interval
+const RAW_METRICS_INTERVAL_S = 2;
+const RAW_SPEEDTEST_INTERVAL_S = 8 * 3600;
 
-// Long ranges must not pull the whole minutely table (up to ~1M rows) over
-// HTTP just to re-average it client-side into ~300 chart points. Up to this
-// span the minutely tier is used; beyond, charts aggregate from
-// metrics_hourly/metrics_daily directly (their bucket width is far below
-// the chart's resolution anyway, so the result is visually identical).
 const MINUTELY_MAX_SPAN_S = 30 * 86400;
 
-// Range key -> duration in seconds (null = "all", resolved dynamically
-// from the oldest available data).
 const RANGE_SECONDS = {
   '1d': 24 * 3600,
   '7d': 7 * 24 * 3600,
@@ -33,15 +17,9 @@ const RANGE_SECONDS = {
   all: null,
 };
 
-let _earliestTsCache = null; // resolved once per page load
-let _earliestTsPromise = null; // de-dupes concurrent callers while resolving
+let _earliestTsCache = null;
+let _earliestTsPromise = null;
 
-// Shared cache for "oldest row of table X" lookups - fetchMetrics() and
-// fetchTraffic() both need the oldest metrics_minutely/metrics_hourly row
-// to decide where to fall back to the next tier, and previously each
-// re-fetched that separately (and sequentially) on every single call. On a
-// high-latency connection (reverse proxy / public domain) those extra
-// round trips are the main reason charts feel slow to load.
 const _oldestRowCache = new Map();
 async function _getOldestRow(table, tsField) {
   if (_oldestRowCache.has(table)) return _oldestRowCache.get(table);
@@ -52,11 +30,7 @@ async function _getOldestRow(table, tsField) {
   return ts;
 }
 
-// Short-lived memoization for fetchMetrics(range): dashboard.js calls it
-// from multiple places on initial load (charts + peak stats) for the same
-// range at nearly the same time - without this they'd each independently
-// refetch and reprocess the exact same data over the network.
-const _metricsMemo = new Map(); // range -> { promise, ts }
+const _metricsMemo = new Map();
 const METRICS_MEMO_TTL_MS = 8000;
 
 function _invalidateCaches() {
@@ -66,10 +40,6 @@ function _invalidateCaches() {
   _metricsMemo.clear();
 }
 
-// Priority order matters (daily is checked first): a table earlier in this
-// list being non-empty means later tables are irrelevant even if they also
-// have rows (e.g. metrics_daily existing means metrics_hourly's oldest row
-// was already rolled up and deleted, so it's not the true "earliest" data).
 const EARLIEST_TS_TABLES = [
   ['metrics_daily', 'ts_day'], ['metrics_hourly', 'ts_hour'],
   ['metrics_minutely', 'ts_minute'], ['metrics', 'ts'],
@@ -77,13 +47,9 @@ const EARLIEST_TS_TABLES = [
 
 async function getEarliestMetricsTs() {
   if (_earliestTsCache != null) return _earliestTsCache;
-  if (_earliestTsPromise) return _earliestTsPromise; // already in flight - don't fire it again
+  if (_earliestTsPromise) return _earliestTsPromise;
 
   _earliestTsPromise = (async () => {
-    // Fire all 4 lookups in parallel instead of stopping at the first
-    // non-empty result one round trip at a time - on a high-latency
-    // connection that's up to 4x slower for no reason, since we need to
-    // check every table's presence anyway in the worst case (fresh install).
     const results = await Promise.all(
       EARLIEST_TS_TABLES.map(([table]) => apiRaw(table, { order: 'asc', limit: 1 }))
     );
@@ -101,9 +67,6 @@ async function getEarliestMetricsTs() {
   return _earliestTsPromise;
 }
 
-// Returns [from, to, resolution_s] for a range key or explicit window.
-// resolution_s targets ~TARGET_POINTS across the span, floored by
-// minResolution so short ranges aren't resolved finer than raw data exists.
 async function resolveRange(rangeKey, fromTs = null, toTs = null, minResolution = RAW_METRICS_INTERVAL_S) {
   const now = Math.floor(Date.now() / 1000);
   let from, to;
@@ -119,7 +82,6 @@ async function resolveRange(rangeKey, fromTs = null, toTs = null, minResolution 
   return [from, to, resolution_s];
 }
 
-// Picks a Chart.js time-axis unit that fits the actual span.
 function pickTimeAxisUnit(fromTs, toTs) {
   const span = Math.max(1, toTs - fromTs);
   const HOUR = 3600, DAY = 86400, MONTH = 30 * DAY, YEAR = 365 * DAY;
@@ -130,11 +92,6 @@ function pickTimeAxisUnit(fromTs, toTs) {
   return { unit: 'year', tooltipFormat: 'yyyy', displayFormats: { year: 'yyyy' } };
 }
 
-// ---------------------------------------------------------------------------
-// Generic backend access
-// ---------------------------------------------------------------------------
-
-// Session cookie is HttpOnly (see api.py); redirect centrally on 401 instead of per call-site.
 function _redirectToLoginOn401(res) {
   if (res.status === 401) {
     window.location.href = '/login';
@@ -172,39 +129,29 @@ async function apiDeleteTable(table, from_ts, to_ts) {
   return res.json();
 }
 
-// Timestamp column per table (must match the TABLES allowlist in api.py), used for cursor pagination below.
 const TS_FIELDS = {
   metrics: 'ts', metrics_minutely: 'ts_minute', metrics_hourly: 'ts_hour', metrics_daily: 'ts_day',
   events: 'ts', speedtests: 'ts', weather: 'ts',
 };
 
-// Fetches ALL rows in [from, to] regardless of the per-request server limit
-// (MAX_LIMIT in api.py). Without pagination, long ranges on dense tables
-// would silently only return the oldest slice of the window. Pages forward
-// by timestamp cursor until a page comes back shorter than the limit.
 async function fetchAllRaw(table, { from, to, filter_col, filter_val } = {}) {
   const tsField = TS_FIELDS[table];
   let out = [];
   let cursor = from;
-  for (let page = 0; page < 500; page++) { // safety cap against infinite loops
+  for (let page = 0; page < 500; page++) {
     const params = { from: cursor, to, limit: MAX_LIMIT, order: 'asc' };
     if (filter_col) { params.filter_col = filter_col; params.filter_val = filter_val; }
     const rows = (await apiRaw(table, params)).data;
     if (!rows.length) break;
     out = out.concat(rows);
-    if (rows.length < MAX_LIMIT) break; // last page reached
+    if (rows.length < MAX_LIMIT) break;
     const lastTs = rows[rows.length - 1][tsField];
     if (lastTs == null || (to != null && lastTs >= to)) break;
-    cursor = lastTs + 1; // continue right after the last row seen
+    cursor = lastTs + 1;
   }
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Metrics: range -> resolution -> bucket aggregation (client-side, was SQL
-// in the backend before). Returns:
-// { from, to, resolution_s, data: [{ts, ping_drop_rate, ping_latency_ms, ...}] }
-// ---------------------------------------------------------------------------
 function avgOf(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null; }
 
 async function fetchMetrics(range) {
@@ -215,7 +162,7 @@ async function fetchMetrics(range) {
   try {
     return await promise;
   } catch (e) {
-    _metricsMemo.delete(range); // don't cache a failed request
+    _metricsMemo.delete(range);
     throw e;
   }
 }
@@ -245,11 +192,6 @@ async function _fetchMetricsUncached(range) {
       min_uplink: r.min_uplink_bps, max_uplink: r.max_uplink_bps,
     }));
   } else {
-    // Bucket aggregate rows into wider buckets. Which source tier depends on
-    // the span: minutely only up to MINUTELY_MAX_SPAN_S (the chart's
-    // ~300-point buckets still average dozens of minutes each), otherwise
-    // hourly (+daily fallback) directly. Ranges fall back before the oldest
-    // row of each tier (see HOURLY_ROLLUP_DAYS in cleanup.py).
     const span = to - from;
     const useMinutely = span <= MINUTELY_MAX_SPAN_S;
     const oldestMinuteTs = useMinutely ? await _getOldestRow('metrics_minutely', 'ts_minute') : Infinity;
@@ -344,12 +286,6 @@ async function _fetchMetricsUncached(range) {
   return { from, to, resolution_s, data };
 }
 
-// ---------------------------------------------------------------------------
-// Traffic (down/up data volume in GB) - same table cascade as fetchMetrics(),
-// but sums bytes instead of averaging. Raw table (range='1d' only) computes
-// bytes per row as bps * RAW_METRICS_INTERVAL_S / 8; from metrics_minutely
-// up, down_bytes/up_bytes are already in the schema (see collector/db.py).
-// Bucket width is coarser than the line charts' TARGET_POINTS for readability.
 const TRAFFIC_BUCKET_S = {
   '1d': 3600, '7d': 86400, '14d': 86400, '1m': 86400,
   '6m': 7 * 86400, '12m': 30 * 86400,
@@ -379,8 +315,6 @@ async function fetchTraffic(range) {
       );
     }
   } else {
-    // Same tier rule + cascade as fetchMetrics(): minutely up to
-    // MINUTELY_MAX_SPAN_S, hourly/daily directly for longer ranges.
     const useMinutely = (to - from) <= MINUTELY_MAX_SPAN_S;
     const [oldestMinuteTs, oldestHourTs] = await Promise.all([
       useMinutely ? _getOldestRow('metrics_minutely', 'ts_minute') : Promise.resolve(Infinity),
@@ -426,9 +360,6 @@ async function fetchTraffic(range) {
   return { from, to, bucket_s, data, totals };
 }
 
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
 async function fetchEvents(range = '7d', type = null) {
   const [from, to] = await resolveRange(range);
   const rows = await fetchAllRaw('events', {
@@ -436,14 +367,10 @@ async function fetchEvents(range = '7d', type = null) {
     filter_col: type ? 'type' : undefined,
     filter_val: type ? type : undefined,
   });
-  rows.sort((a, b) => b.ts - a.ts); // newest first (fetchAllRaw returns ascending)
+  rows.sort((a, b) => b.ts - a.ts);
   return rows;
 }
 
-// ---------------------------------------------------------------------------
-// Speedtests: same target-point-count logic as metrics. Bucket width comes
-// from resolveRange(), floored at the speedtest interval itself (8h).
-// ---------------------------------------------------------------------------
 async function fetchSpeedtests(range = 'all') {
   const [from, to, resolution_s] = await resolveRange(range, null, null, RAW_SPEEDTEST_INTERVAL_S);
   const rows = await fetchAllRaw('speedtests', { from, to });
@@ -480,9 +407,6 @@ async function fetchSpeedtests(range = 'all') {
   return { from, to, resolution_s, data };
 }
 
-// ---------------------------------------------------------------------------
-// Dish status, weather, stats summary
-// ---------------------------------------------------------------------------
 async function fetchDishStatus() {
   const [latest, info] = await Promise.all([apiLatest('metrics'), apiLatest('dish_info')]);
   if ((!latest || !latest.ts) && (!info || !info.id)) return {};
@@ -506,9 +430,6 @@ async function fetchWeatherWarnings() {
   return raw.data.filter((r) => r.warning).slice(0, 20);
 }
 
-// Dish states that mean "the link is currently down" (used for ongoing-
-// outage detection in fetchStatsSummary). UNKNOWN/null are deliberately
-// excluded - some firmware versions report them during normal operation.
 const DOWN_STATES = new Set([
   'SEARCHING', 'STOWED', 'BOOTING', 'THERMAL_SHUTDOWN',
   'NO_SIGNAL', 'UPDATE', 'FACTORY_RESET', 'BOOTLOADER',
@@ -518,10 +439,6 @@ async function fetchStatsSummary() {
   const now = Math.floor(Date.now() / 1000);
   const dayAgo = now - 24 * 3600;
 
-  // 24h averages come from metrics_minutely (1,440 rows) instead of the raw
-  // 2s table (43,200 rows) - called every 30s, the raw variant wasted
-  // megabytes of traffic per call. Fresh installs (<1h old) may not have
-  // minutely rows yet - fall back to raw for that window.
   const [minuteRows, disconnectRows, lastSpeedtestRaw] = await Promise.all([
     fetchAllRaw('metrics_minutely', { from: dayAgo, to: now }),
     fetchAllRaw('events', { from: dayAgo, to: now, filter_col: 'type', filter_val: 'disconnect' }),
@@ -540,16 +457,11 @@ async function fetchStatsSummary() {
     obstr = rawRows.filter((m) => m.obstr_fraction != null).map((m) => m.obstr_fraction);
   }
 
-  // Only the part of each (ended) event inside the 24h window counts - an
-  // event whose duration started before the window must not fully count.
   const endedDowntimeS = disconnectRows.reduce(
     (sum, e) => sum + Math.min(e.duration_s || 0, e.ts - dayAgo),
     0,
   );
 
-  // Ongoing outage: no "ended" event exists yet, but the dish state in the
-  // newest raw row tells us the link is currently down. Find the last
-  // CONNECTED row to know when it went down.
   const [latestRaw, lastConnectedRaw] = await Promise.all([
     apiRaw('metrics', { order: 'desc', limit: 1 }),
     apiRaw('metrics', { filter_col: 'state', filter_val: 'CONNECTED', order: 'desc', limit: 1 }),
@@ -559,14 +471,12 @@ async function fetchStatsSummary() {
   if (latestState && DOWN_STATES.has(latestState)) {
     const lastConnTs = lastConnectedRaw.data[0]?.ts;
     if (lastConnTs == null) {
-      ongoingDowntimeS = 86400; // down for the entire window
+      ongoingDowntimeS = 86400;
     } else {
       ongoingDowntimeS = Math.max(0, Math.min(now - dayAgo, now - lastConnTs));
     }
   }
 
-  // Active hardware alert count from the latest alerts_bitfield (same
-  // bit mapping as dashboard.js ALERT_BITS) - feeds the Dish Health Score.
   const bitfield = latestRaw.data[0]?.alerts_bitfield;
   let activeAlerts = 0;
   if (bitfield != null) {
@@ -590,18 +500,12 @@ async function fetchStatsSummary() {
   };
 }
 
-// ---------------------------------------------------------------------------
-// CSV export (client-side Blob, was a backend StreamingResponse before)
-// ---------------------------------------------------------------------------
 function csvEscape(v) {
   if (v === null || v === undefined) return '';
   const s = String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-// Export granularity per range: the finest tier whose row count stays
-// practical. Raw 2s rows exist for 90 days (cleanup.py), minutely for ~2
-// years, hourly/daily beyond. Events + speedtests are always exported raw.
 const CSV_TIER_BY_RANGE = {
   '1d': 'raw', '7d': 'minutely', '14d': 'minutely', '1m': 'minutely',
   '3m': 'minutely', '6m': 'hourly', '12m': 'hourly', all: 'hourly',
@@ -681,19 +585,10 @@ async function downloadCsv(range) {
   URL.revokeObjectURL(url);
 }
 
-// ---------------------------------------------------------------------------
-// Peak values (best latency, highest down/upload) from the 2s live samples.
-// fetchMetrics() already returns min_latency/max_downlink/max_uplink per
-// bucket, so we just take the extremum across buckets instead of re-loading
-// the full raw history.
-// ---------------------------------------------------------------------------
 async function fetchPeakStats(range) {
   const json = await fetchMetrics(range);
   let bestLatencyMs = null, peakDownloadBps = null, peakUploadBps = null;
   for (const d of json.data) {
-    // Starlink reports -1 (or other <=0 values) as a "no data" sentinel for
-    // latency, not a real measurement - exclude those or "best latency"
-    // ends up showing an impossible negative number.
     const lat = d.min_latency ?? d.ping_latency_ms;
     if (lat != null && lat > 0 && (bestLatencyMs == null || lat < bestLatencyMs)) bestLatencyMs = lat;
     const down = d.max_downlink ?? d.downlink_bps;
@@ -709,14 +604,6 @@ async function fetchPeakStats(range) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Jitter: mean |Δ| between consecutive latency samples, computed at runtime
-// (no schema change). True jitter needs the raw 2s samples, so 1d uses those
-// exactly. Longer ranges approximate with |Δ| between consecutive
-// minute/hour/day averages - the UI labels the basis. Deltas across gaps
-// bigger than the entry's tolerance (e.g. an outage) break the chain: that's
-// downtime, not jitter.
-// ---------------------------------------------------------------------------
 const JITTER_TOL_S = { raw: 15, minute: 300, hour: 7200, day: 3 * 86400 };
 const JITTER_BASIS_LABEL = { raw: '2s samples', minute: 'minute avg', hour: 'hour avg', day: 'day avg' };
 
@@ -725,7 +612,7 @@ async function fetchJitter(range) {
   const span = Math.max(1, to - from);
   const bucketS = Math.max(120, Math.ceil(span / TARGET_POINTS));
   const buckets = new Map();
-  const entries = []; // { ts, lat, basis } chronological
+  const entries = [];
 
   if (range === '1d') {
     const rows = await fetchAllRaw('metrics', { from, to });
@@ -763,8 +650,6 @@ async function fetchJitter(range) {
         }
       }
     } else {
-      // Long range: hourly (+daily fallback) deltas only - pulling the whole
-      // minutely history would dominate the load time for no visual gain.
       const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
       const hourFrom = Number.isFinite(oldestHourTs) ? Math.max(from, oldestHourTs) : from;
       const hourRows = await fetchAllRaw('metrics_hourly', { from: hourFrom, to });
@@ -807,12 +692,6 @@ async function fetchJitter(range) {
   return { from, to, basis: coarsest, basis_label: JITTER_BASIS_LABEL[coarsest], data };
 }
 
-// ---------------------------------------------------------------------------
-// Weather: warning intervals + correlation insight (runtime, no schema change)
-// ---------------------------------------------------------------------------
-
-// Consecutive weather rows with an active warning (≤30min apart) merge into
-// one interval, padded ±10min so the band visibly brackets the event.
 async function fetchWeatherWarningIntervals(range) {
   const [from, to] = await resolveRange(range);
   const weatherRows = await fetchAllRaw('weather', { from, to });
@@ -833,9 +712,6 @@ async function fetchWeatherWarningIntervals(range) {
   return intervals;
 }
 
-// Compares latency/drop while a weather warning was active vs. normal
-// conditions. Uses minutely rows for ranges ≤30d, hourly (+daily fallback)
-// beyond so an 'all'-range fetch stays cheap.
 async function fetchWeatherCorrelation(range) {
   const [from, to] = await resolveRange(range);
   const intervals = await fetchWeatherWarningIntervals(range);
@@ -883,15 +759,12 @@ async function fetchWeatherCorrelation(range) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// SLA statistics from the events table (runtime, no schema change)
-// ---------------------------------------------------------------------------
 async function fetchSlaStats() {
   const now = Math.floor(Date.now() / 1000);
   const [from] = await resolveRange('all');
   const events = await fetchAllRaw('events', { from, to: now, filter_col: 'type', filter_val: 'disconnect' });
 
-  const months = new Map(); // 'YYYY-MM' -> downS
+  const months = new Map();
   const hourHist = new Array(24).fill(0);
   let longestS = 0, totalDownS = 0;
 
@@ -935,9 +808,59 @@ async function fetchSlaStats() {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Admin delete (the metrics+metrics_minutely cascade is UI logic, so it lives here, not in the backend)
-// ---------------------------------------------------------------------------
+async function fetchLatencyHeatmap(weeks = 8) {
+  const now = Math.floor(Date.now() / 1000);
+  const from = now - weeks * 7 * 86400;
+  const rows = await fetchAllRaw('metrics_minutely', { from, to: now });
+
+  const cells = Array.from({ length: 7 }, () =>
+    Array.from({ length: 24 }, () => ({ sum: 0, n: 0 })),
+  );
+  for (const r of rows) {
+    if (r.avg_ping_latency_ms == null || r.avg_ping_latency_ms <= 0) continue;
+    const d = new Date(r.ts_minute * 1000);
+    const dow = (d.getDay() + 6) % 7;
+    const h = d.getHours();
+    cells[dow][h].sum += r.avg_ping_latency_ms;
+    cells[dow][h].n++;
+  }
+  return cells.map((day) => day.map((c) => (c.n ? { ms: c.sum / c.n, n: c.n } : null)));
+}
+
+async function fetchOutageCalendar(weeks = 16) {
+  const now = Math.floor(Date.now() / 1000);
+  const from = now - weeks * 7 * 86400;
+  const events = await fetchAllRaw('events', { from, to: now, filter_col: 'type', filter_val: 'disconnect' });
+
+  const byDay = new Map();
+  for (const e of events) {
+    const d = e.duration_s || 0;
+    const end = new Date(e.ts * 1000);
+    const key = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`;
+    byDay.set(key, (byDay.get(key) || 0) + d);
+  }
+
+  const today = new Date(now * 1000);
+  today.setHours(0, 0, 0, 0);
+  const gridStart = new Date(today);
+  gridStart.setDate(today.getDate() - today.getDay() - (weeks - 1) * 7);
+
+  const cells = [];
+  for (let w = 0; w < weeks; w++) {
+    for (let d = 0; d < 7; d++) {
+      const day = new Date(gridStart);
+      day.setDate(gridStart.getDate() + w * 7 + d);
+      const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+      cells.push({
+        ts: day.getTime() / 1000,
+        downS: byDay.get(key) || 0,
+        future: day.getTime() > Date.now(),
+      });
+    }
+  }
+  return { cells, weeks };
+}
+
 async function adminDelete(target, from_ts, to_ts) {
   let result;
   if (target === 'metrics') {

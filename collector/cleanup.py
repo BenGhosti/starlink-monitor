@@ -1,26 +1,3 @@
-"""
-cleanup.py
-Runs once a day (see collect.py) as its own task in the collector process.
-
-Three-tier compression:
-- Raw metrics (2s ticks) older than RETENTION_DAYS (90) get rolled up into
-  hourly aggregates in `metrics_hourly` (avg drop rate, avg/max latency,
-  avg obstruction, avg throughput, traffic bytes, sample_count), then the
-  compressed raw rows are deleted.
-- metrics_hourly rows older than HOURLY_ROLLUP_DAYS (default 365) get rolled
-  up further into `metrics_daily`, then deleted.
-- metrics_minutely (filled continuously by metrics_minutely_aggregator.py)
-  gets its own, much longer retention (MINUTELY_RETENTION_DAYS, default ~2
-  years) and is simply deleted past that point, not compressed further -
-  metrics_hourly/metrics_daily already cover that range.
-- events, speedtests, weather are untouched (low volume, not worth aggregating).
-- Point-in-time fields (dish orientation, GPS status, device info) are
-  intentionally NOT carried into the aggregates - they have no meaningful
-  "average" after 90 days.
-- Idempotent: UNIQUE(ts_hour)/UNIQUE(ts_day) + ON CONFLICT UPDATE means
-  re-running over the same range never double-counts.
-"""
-
 import asyncio
 import logging
 import os
@@ -31,18 +8,12 @@ from db import get_db, RAW_SAMPLE_INTERVAL_S
 logger = logging.getLogger("cleanup")
 
 RETENTION_DAYS = 90
-MINUTELY_RETENTION_DAYS = int(os.environ.get("MINUTELY_RETENTION_DAYS", "730"))  # ~2 years
-HOURLY_ROLLUP_DAYS = int(os.environ.get("HOURLY_ROLLUP_DAYS", "365"))  # rolls up to metrics_daily past this age
-RUN_INTERVAL_S = 24 * 60 * 60  # once a day
+MINUTELY_RETENTION_DAYS = int(os.environ.get("MINUTELY_RETENTION_DAYS", "730"))
+HOURLY_ROLLUP_DAYS = int(os.environ.get("HOURLY_ROLLUP_DAYS", "365"))
+RUN_INTERVAL_S = 24 * 60 * 60
 HOUR_S = 3600
 DAY_S = 24 * HOUR_S
 
-# The compression passes commit in batches instead of one giant transaction:
-# in WAL mode the write lock is held from the first write until commit, so a
-# single transaction spanning months of data would block the 2s
-# metrics_collector writes until they hit busy_timeout and get lost. A batch
-# of 12 hours of raw data (or 7 days of hourly rows) takes only a few hundred
-# ms, so the live writer slips in between batches.
 BATCH_HOURS = 12
 BATCH_DAYS = 7
 
@@ -50,7 +21,6 @@ BATCH_DAYS = 7
 async def compress_old_metrics(db):
     cutoff_ts = int(time.time()) - RETENTION_DAYS * 24 * HOUR_S
 
-    # Find the oldest raw row so we don't iterate over years of empty hours
     async with db.execute("SELECT MIN(ts) FROM metrics WHERE ts < ?", (cutoff_ts,)) as cur:
         row = await cur.fetchone()
     if not row or row[0] is None:
@@ -58,7 +28,7 @@ async def compress_old_metrics(db):
         return
 
     start_hour = (row[0] // HOUR_S) * HOUR_S
-    end_hour = (cutoff_ts // HOUR_S) * HOUR_S  # last FULL hour before the cutoff
+    end_hour = (cutoff_ts // HOUR_S) * HOUR_S
 
     compressed_hours = 0
     deleted_rows = 0
@@ -115,13 +85,10 @@ async def compress_old_metrics(db):
         hours_since_commit += 1
         if hours_since_commit >= BATCH_HOURS:
             await db.commit()
-            await asyncio.sleep(0)  # let the 2s writer grab the lock before the next batch
+            await asyncio.sleep(0)
             hours_since_commit = 0
 
     await db.commit()
-    # Deliberately no VACUUM here - it locks the whole DB exclusively and
-    # would stall metrics_collector/ping_watchdog for the duration. WAL
-    # checkpointing reclaims space incrementally in the background.
 
     logger.info(
         "Cleanup done: %s hours compressed, %s raw rows deleted.",
@@ -130,11 +97,6 @@ async def compress_old_metrics(db):
 
 
 async def compress_old_hourly(db):
-    """Third compression tier: rolls up metrics_hourly rows older than
-    HOURLY_ROLLUP_DAYS into metrics_daily per full calendar day (UTC), then
-    deletes the source hours. sample_count is SUM() of the hourly
-    sample_counts (the real underlying 2s-sample count), not row count, so
-    weighting stays exact across rollup stages."""
     cutoff_ts = int(time.time()) - HOURLY_ROLLUP_DAYS * DAY_S
 
     async with db.execute("SELECT MIN(ts_hour) FROM metrics_hourly WHERE ts_hour < ?", (cutoff_ts,)) as cur:
@@ -144,7 +106,7 @@ async def compress_old_hourly(db):
         return
 
     start_day = (row[0] // DAY_S) * DAY_S
-    end_day = (cutoff_ts // DAY_S) * DAY_S  # last FULL day before the cutoff
+    end_day = (cutoff_ts // DAY_S) * DAY_S
 
     compressed_days = 0
     deleted_rows = 0
@@ -216,12 +178,6 @@ async def compress_old_hourly(db):
 
 
 async def cleanup_old_minutely(db):
-    """Deletes metrics_minutely rows older than MINUTELY_RETENTION_DAYS in
-    day-sized batches. No compression (unlike compress_old_metrics) -
-    metrics_hourly/metrics_daily already cover that far back. Chunked because
-    a single DELETE over ~1M rows would hold the WAL write lock for seconds
-    and stall the 2s metrics_collector writer the same way a giant
-    transaction would."""
     cutoff_ts = int(time.time()) - MINUTELY_RETENTION_DAYS * 24 * HOUR_S
     deleted = 0
     while True:
@@ -258,9 +214,6 @@ async def run():
                 await compress_old_metrics(db)
                 await compress_old_hourly(db)
                 await cleanup_old_minutely(db)
-                # Refreshes SQLite's query-planner statistics (lightweight,
-                # no table rewrite like VACUUM) - worth doing after each
-                # compression pass since the row distribution shifts a lot.
                 await db.execute("PRAGMA optimize;")
             except Exception:  # noqa: BLE001
                 logger.exception("Error in cleanup run")

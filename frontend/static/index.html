@@ -4,15 +4,36 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Starlink Monitor</title>
-<link rel="stylesheet" href="/static/style.css?v=4">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/style.css?v=6">
 <script defer src="/static/vendor/chart.umd.js"></script>
 <script defer src="/static/vendor/chartjs-adapter-date-fns.bundle.min.js"></script>
 <script defer src="/static/vendor/html2canvas.min.js"></script>
 </head>
 <body>
+<div class="boot-overlay" id="bootOverlay">
+  <div class="boot-card">
+    <svg class="boot-logo" viewBox="0 0 64 64" aria-hidden="true">
+      <defs>
+        <linearGradient id="bootBeam" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stop-color="#5ba3d0" stop-opacity="0"/>
+          <stop offset="1" stop-color="#5ba3d0" stop-opacity="0.9"/>
+        </linearGradient>
+      </defs>
+      <rect width="64" height="64" rx="12" fill="#0d1520"/>
+      <path d="M12 46 Q32 28 52 46" fill="none" stroke="#5ba3d0" stroke-width="3" stroke-linecap="round"/>
+      <path d="M32 30 L20 10 L44 10 Z" fill="url(#bootBeam)"/>
+      <circle cx="32" cy="30" r="3" fill="#56d88f"/>
+    </svg>
+    <div class="boot-brand">Starlink Monitor</div>
+    <div class="boot-status" id="bootStatus">Loading assets</div>
+    <div class="boot-bar"><div class="boot-bar-fill" id="bootBarFill"></div></div>
+    <div class="boot-counter" id="bootCounter">0.0s</div>
+  </div>
+</div>
+
 <div class="db">
 
-  <!-- ============ TOPBAR ============ -->
   <div class="topbar">
     <span class="logo">Starlink Monitor</span>
     <nav class="tabs" id="mainTabs">
@@ -31,7 +52,6 @@
     </div>
   </div>
 
-  <!-- ============ ADMIN MODAL ============ -->
   <div class="admin-overlay" id="adminOverlay">
     <div class="admin-modal">
       <div class="admin-header">
@@ -85,12 +105,8 @@
     </div>
   </div>
 
-  <!-- ================================================================
-       TAB: OVERVIEW (core info)
-  ================================================================= -->
   <div class="tab-page active" id="tab-overview">
 
-    <!-- Weather bar -->
     <div class="weather-bar" id="weatherBar">
       <span class="weather-city" id="weatherCity">–</span>
       <span style="color:#c8d6e5" id="weatherMain">–</span>
@@ -98,7 +114,6 @@
       <span class="weather-warn" id="weatherWarn" style="display:none"></span>
     </div>
 
-    <!-- Stat tiles -->
     <div class="section-label">Overview · last 24 hours</div>
     <div class="stat-row">
       <div class="stat">
@@ -126,7 +141,6 @@
       </div>
     </div>
 
-    <!-- Health score + Sky view -->
     <div class="overview-grid">
       <div class="panel health-panel">
         <div class="panel-title">
@@ -164,7 +178,6 @@
       </div>
     </div>
 
-    <!-- Recent events -->
     <div class="panel" style="margin-bottom:12px">
       <div class="panel-title">
         <span>Recent Events</span>
@@ -176,9 +189,6 @@
     </div>
   </div>
 
-  <!-- ================================================================
-       TAB: QUALITY (line charts + weather correlation)
-  ================================================================= -->
   <div class="tab-page" id="tab-quality">
     <div class="section-label">Connection Quality</div>
     <div class="main-grid">
@@ -224,7 +234,7 @@
         <div class="panel-title">
           <span>Jitter · live</span>
           <div style="display:flex;align-items:center;gap:10px">
-            <span id="jitterBasis" style="font-size:9px;color:#3a5070">Basis: 2s</span>
+            <span id="jitterBasis" style="font-size:9px;color:#3a5070">Basis: 2s samples</span>
             <div class="range-btns" data-target="jitter">
               <span class="rb active" data-range="1d">1d</span>
               <span class="rb" data-range="7d">7d</span>
@@ -260,7 +270,6 @@
       </div>
     </div>
 
-    <!-- Weather correlation -->
     <div class="panel" style="margin-bottom:18px">
       <div class="panel-title">
         <span>Weather Correlation</span>
@@ -272,9 +281,6 @@
     </div>
   </div>
 
-  <!-- ================================================================
-       TAB: DATA (speedtest, traffic, peak values)
-  ================================================================= -->
   <div class="tab-page" id="tab-data">
 
     <div class="section-label">Peak Values · from live sampling (2s)</div>
@@ -352,9 +358,6 @@
     </div>
   </div>
 
-  <!-- ================================================================
-       TAB: DISH (hardware status)
-  ================================================================= -->
   <div class="tab-page" id="tab-dish">
     <div class="section-label">Dish Status</div>
     <div class="dish-grid">
@@ -421,10 +424,44 @@
     </div>
   </div>
 
-  <!-- ================================================================
-       TAB: HISTORY (SLA stats + event log)
-  ================================================================= -->
   <div class="tab-page" id="tab-history">
+    <div class="section-label">Latency Patterns</div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title">
+        <span>Latency by Hour &amp; Weekday</span>
+        <span style="color:#2a3d52;font-size:9px">avg latency · last 8 weeks · local time</span>
+      </div>
+      <div class="hm-wrap">
+        <div class="hm-y" id="latencyHeatmapY"></div>
+        <div class="hm-main">
+          <div class="hm-x" id="latencyHeatmapX"></div>
+          <div class="hm-grid" id="latencyHeatmap"></div>
+          <div class="hm-legend" id="latencyHeatmapLegend"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-label">Outage Calendar</div>
+    <div class="panel" style="margin-bottom:12px">
+      <div class="panel-title">
+        <span>Outages by Day</span>
+        <span style="color:#2a3d52;font-size:9px">downtime per day · last 16 weeks</span>
+      </div>
+      <div class="cal-wrap">
+        <div class="cal-y" id="outageCalendarY"></div>
+        <div class="cal-grid" id="outageCalendar"></div>
+      </div>
+      <div class="cal-legend">
+        <span>less</span>
+        <span class="cal-legend-cell l0"></span>
+        <span class="cal-legend-cell l1"></span>
+        <span class="cal-legend-cell l2"></span>
+        <span class="cal-legend-cell l3"></span>
+        <span class="cal-legend-cell l4"></span>
+        <span>more</span>
+      </div>
+    </div>
+
     <div class="section-label">SLA & Reliability</div>
     <div class="panel" style="margin-bottom:12px">
       <div class="panel-title">
@@ -479,7 +516,6 @@
     </div>
   </div>
 
-  <!-- ============ FOOTER ============ -->
   <div class="bottom-bar">
     <span id="footerStats">DB: – · – data points · since –</span>
     <span class="brand-credit">Developed by <a href="https://ben-ghosti.de" target="_blank" rel="noopener">Ben Ghosti</a></span>
@@ -488,7 +524,7 @@
 
 </div>
 
-<script defer src="/static/api-client.js?v=4"></script>
-<script defer src="/static/dashboard.js?v=4"></script>
+<script defer src="/static/api-client.js?v=6"></script>
+<script defer src="/static/dashboard.js?v=6"></script>
 </body>
 </html>

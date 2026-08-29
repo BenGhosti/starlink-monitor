@@ -1,25 +1,3 @@
-"""
-api.py
-FastAPI backend for the `frontend` container - a GENERIC DATA LAYER.
-
-Design principle (see BACKEND_GUIDE.md): the backend has no dashboard-
-specific logic (no range->resolution, no aggregation, no stats, no CSV
-format) - it only serves generic, safe read/delete access to the SQLite
-tables. All display/aggregation logic lives in the frontend
-(static/api-client.js). New charts/metrics = only touch JS.
-
-Endpoints:
-- GET    /api/raw/{table}     generic filtered row query
-- GET    /api/latest/{table}  most recent row of a table
-- GET    /api/columns/{table} column list of a table (for generic clients)
-- DELETE /api/admin/{table}   delete rows in a time range
-- WS     /ws/live             pushes the newest `metrics` row raw, 2s cadence
-- POST   /api/login, /api/logout  session-cookie auth (see login.html)
-- GET    /login                login page (reachable unauthenticated)
-- GET    /              index.html (redirects to /login without a valid session)
-- /static/*             static files
-"""
-
 import asyncio
 import base64
 import hashlib
@@ -53,10 +31,6 @@ if ADMIN_PASS == "changeme":
         "ADMIN_PASS is still the default 'changeme' - change it in .env for production!"
     )
 
-# Session auth replaces HTTP Basic (see login.html/login.js). SESSION_SECRET
-# MUST be set in .env. There is deliberately no fallback/default: deriving a
-# predictable key from the (also default) admin credentials would let anyone
-# forge valid session cookies and bypass auth on every /api/* route.
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip()
 if not SESSION_SECRET:
     raise RuntimeError(
@@ -66,18 +40,11 @@ if not SESSION_SECRET:
     )
 
 COOKIE_NAME = "sm_session"
-SESSION_TTL_S = 12 * 3600  # 12h, then log in again
+SESSION_TTL_S = 12 * 3600
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 
-# 2FA (TOTP, RFC 6238) is optional and purely .env-driven - no DB schema
-# involved, so it can be added/removed independently of the rest of the DB
-# work without touching existing data. If TOTP_SECRET is set, /api/login
-# requires a 6-digit code from an authenticator app in addition to
-# username/password. Generate a secret with scripts/generate_2fa_secret.py
 TOTP_SECRET = os.environ.get("TOTP_SECRET", "").strip()
 
-# Simple in-memory rate limiting for /api/login (no Redis needed for a
-# single-instance app): IP -> list of failure timestamps within LOGIN_WINDOW_S.
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_S = 300
 _login_attempts: dict[str, list[float]] = {}
@@ -125,9 +92,6 @@ def _record_failed_attempt(ip: str) -> None:
     _login_attempts.setdefault(ip, []).append(time.time())
 
 
-# Allowlist: the one place that needs to know about a new table. ts_col is
-# the timestamp column name (for from/to filtering + ordering). The frontend
-# can fetch the full column list via /api/columns/{table} if needed.
 TABLES = {
     "metrics": "ts",
     "metrics_minutely": "ts_minute",
@@ -136,7 +100,7 @@ TABLES = {
     "events": "ts",
     "speedtests": "ts",
     "weather": "ts",
-    "dish_info": None,  # singleton table (id=1), no time window
+    "dish_info": None,
 }
 
 DEFAULT_LIMIT = 5000
@@ -144,8 +108,6 @@ MAX_LIMIT = 50000
 
 
 def check_auth(request: Request) -> str:
-    """Session-cookie auth for /api/* endpoints. Returns 401 JSON instead of
-    a browser login box - api-client.js catches that and redirects to /login."""
     username = verify_session_cookie(request.cookies.get(COOKIE_NAME))
     if username is None:
         raise HTTPException(status_code=401, detail="Not authenticated.")
@@ -153,15 +115,10 @@ def check_auth(request: Request) -> str:
 
 
 async def _connect_with_retry(max_attempts: int = 15, delay_s: float = 2.0):
-    """Connects to the SQLite DB with retries (the collector may create the schema later)."""
     last_exc = None
     for attempt in range(1, max_attempts + 1):
         try:
             db = await aiosqlite.connect(DB_PATH)
-            # Connection-local pragmas only (no journal_mode/synchronous - those
-            # are DB-wide and already set by the collector; this DB is mounted
-            # :ro here). busy_timeout avoids immediate "database is locked"
-            # errors when overlapping with the hourly compression job.
             await db.execute("PRAGMA busy_timeout=5000;")
             await db.execute("PRAGMA cache_size=-32000;")
             await db.execute("PRAGMA temp_store=MEMORY;")
@@ -185,11 +142,6 @@ async def _connect_with_retry(max_attempts: int = 15, delay_s: float = 2.0):
 async def lifespan(app: FastAPI):
     app.state.db = await _connect_with_retry()
     app.state.db.row_factory = aiosqlite.Row
-    # Second connection dedicated to the WS broadcast loop. aiosqlite runs
-    # each connection on its own thread, but queries on the SAME connection
-    # serialize - without this, a heavy range query (e.g. a 50k-row page)
-    # queues the tiny "newest metrics row" poll behind it and live updates
-    # stutter for the duration of the load.
     app.state.broadcast_db = await _connect_with_retry()
     app.state.broadcast_db.row_factory = aiosqlite.Row
     app.state.ws_clients: set[WebSocket] = set()
@@ -202,10 +154,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Starlink Monitor API", lifespan=lifespan)
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _require_table(table: str) -> str:
     if table not in TABLES:
@@ -221,19 +169,18 @@ async def _valid_columns(db, table: str) -> set[str]:
     return cols
 
 
-# ---------------------------------------------------------------------------
-# Generic read endpoints
-# ---------------------------------------------------------------------------
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
+
 @app.get("/api/columns/{table}")
 async def get_columns(table: str, request: Request, _user: str = Depends(check_auth)):
-    """Column list of a table - lets generic clients adapt to the schema
-    without the backend needing any dashboard-specific knowledge."""
     _require_table(table)
     cols = sorted(await _valid_columns(request.app.state.db, table))
     return {"table": table, "columns": cols, "ts_col": TABLES[table]}
@@ -251,15 +198,6 @@ async def get_raw(
     filter_val: str | None = Query(None),
     _user: str = Depends(check_auth),
 ):
-    """Generic filtered row query for a table.
-
-    - from/to: time window over the table's timestamp column (see TABLES).
-    - filter_col/filter_val: optional equality filter on any column that
-      actually exists (e.g. filter_col=type&filter_val=disconnect for
-      events). filter_col is validated against PRAGMA table_info before
-      being interpolated into SQL - no injection risk, since only real
-      column names of the table are accepted.
-    """
     _require_table(table)
     db = request.app.state.db
     ts_col = TABLES[table]
@@ -288,7 +226,6 @@ async def get_raw(
 
 @app.get("/api/latest/{table}")
 async def get_latest(table: str, request: Request, _user: str = Depends(check_auth)):
-    """Most recent row of a table (by timestamp column, or id for singletons)."""
     _require_table(table)
     db = request.app.state.db
     ts_col = TABLES[table]
@@ -298,14 +235,8 @@ async def get_latest(table: str, request: Request, _user: str = Depends(check_au
     return dict(row) if row else {}
 
 
-# ---------------------------------------------------------------------------
-# WebSocket live feed - pushes the newest `metrics` row raw, unmodified
-# ---------------------------------------------------------------------------
-
 @app.websocket("/ws/live")
 async def ws_live(websocket: WebSocket):
-    # The browser sends cookies automatically on the WS handshake (same
-    # origin) - no manual header handling needed, unlike with Basic Auth.
     username = verify_session_cookie(websocket.cookies.get(COOKIE_NAME))
     if username is None:
         await websocket.close(code=4401)
@@ -323,9 +254,6 @@ async def ws_live(websocket: WebSocket):
 
 
 async def broadcast_loop(app: FastAPI):
-    """Polls the newest metrics row every 2s and pushes it raw to all WS clients.
-    Uses its own DB connection (app.state.broadcast_db) so heavy API queries
-    on the shared connection never delay the live feed."""
     last_ts_sent = 0
     while True:
         try:
@@ -339,8 +267,6 @@ async def broadcast_loop(app: FastAPI):
                 dead = []
                 for ws in list(app.state.ws_clients):
                     try:
-                        # Per-client send timeout: one slow/stalled client
-                        # must not block the broadcast for everyone else.
                         await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
                     except Exception:  # noqa: BLE001
                         dead.append(ws)
@@ -353,13 +279,7 @@ async def broadcast_loop(app: FastAPI):
         await asyncio.sleep(2)
 
 
-# ---------------------------------------------------------------------------
-# Admin API - data cleanup (DELETE, protected by session auth)
-# ---------------------------------------------------------------------------
-
 class DeleteRequest(pydantic.BaseModel):
-    """Time range for DELETE operations. from_ts/to_ts are optional (Unix
-    timestamps); if neither is given, all rows in the table are deleted."""
     from_ts: int | None = None
     to_ts: int | None = None
 
@@ -371,10 +291,6 @@ async def delete_table(
     body: DeleteRequest,
     _user: str = Depends(check_auth),
 ):
-    """Deletes rows of a single table within a time range (or all of them).
-    For cascading deletes (e.g. clearing metrics + metrics_minutely
-    together), the frontend calls this endpoint multiple times - that's a
-    UI decision, not a backend concern."""
     _require_table(table)
     if table == "dish_info":
         raise HTTPException(status_code=400, detail="dish_info cannot be deleted by time range.")
@@ -392,16 +308,8 @@ async def delete_table(
     return {"table": table, "deleted": deleted}
 
 
-# ---------------------------------------------------------------------------
-# Login / Logout
-# ---------------------------------------------------------------------------
-
 @app.get("/api/config")
 async def public_config():
-    """Public (no auth) - UI hints only, no secrets. login.js uses this to
-    detect e.g. COOKIE_SECURE=true while the page is loaded over plain HTTP,
-    which would otherwise make the browser silently drop the session cookie
-    and login fail with no visible error."""
     return {"cookie_secure": COOKIE_SECURE, "totp_required": bool(TOTP_SECRET)}
 
 
@@ -457,16 +365,10 @@ async def logout():
 
 @app.get("/logout")
 async def logout_redirect():
-    """Convenient direct browser navigation (e.g. a bookmark), without JS
-    having to build a POST request."""
     response = RedirectResponse(url="/login")
     response.delete_cookie(COOKIE_NAME, path="/")
     return response
 
-
-# ---------------------------------------------------------------------------
-# Static files (index.html, dashboard.js, style.css)
-# ---------------------------------------------------------------------------
 
 @app.get("/")
 async def root(request: Request):

@@ -33,7 +33,6 @@ html, body {
   padding: 24px;
 }
 
-/* Subtle rotating ring background, echoing the dashboard's "Sky View" dome. */
 .login-orbit {
   position: absolute;
   top: 50%;

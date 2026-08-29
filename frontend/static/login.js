@@ -9,10 +9,6 @@ function showError(msg) {
   errorBox.style.display = 'block';
 }
 
-// Self-check on load: catches the most common silent failure (server
-// requires Secure cookies but the page loaded over plain HTTP, so the
-// browser drops the cookie without saying so - login returns 200 but
-// no session ever exists).
 (async () => {
   try {
     const res = await fetch('/api/config', { credentials: 'include' });
@@ -34,7 +30,6 @@ function showError(msg) {
       totpInput.setAttribute('required', 'required');
     }
   } catch (_err) {
-    // /api/config unreachable - not a blocker, form stays usable normally
   }
 })();
 
@@ -63,7 +58,6 @@ form.addEventListener('submit', async (e) => {
     }
 
     if (res.status === 400) {
-      // Password was correct, just missing the 2FA code
       showError('Please enter the 2FA code from your authenticator app.');
       totpInput.focus();
     } else if (res.status === 429) {

@@ -1,11 +1,3 @@
-"""
-weather_state.py
-Minimal in-process shared state: weather_poller.py writes the latest weather
-snapshot here, ping_watchdog.py reads it for disconnect alerts. Both
-coroutines run in the same asyncio event loop/process (see collect.py), so a
-plain module-level dict without locking is sufficient.
-"""
-
 _last_weather: dict = {}
 
 

@@ -1,14 +1,3 @@
-"""
-collect.py
-Entry point for the `collector` container. Starts metrics_collector,
-ping_watchdog, weather_poller, speedtest_runner, and the cleanup job as
-parallel asyncio tasks in one process.
-
-If a task crashes, the others keep running and it gets logged, but the
-process then exits so Docker (restart: always) restarts it - avoiding a
-"half-dead" container with only some of the 5 tasks still running.
-"""
-
 import asyncio
 import logging
 import sys

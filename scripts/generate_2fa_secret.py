@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""
-generate_2fa_secret.py
-Run this once, locally (NOT inside the Docker container - e.g. on the Unraid
-host or your own machine), to generate a new TOTP secret for 2FA login.
-Prints:
-  1. The line to put in .env (TOTP_SECRET=...)
-  2. The otpauth:// URI for manual entry into an authenticator app
-  3. An ASCII QR code to scan (if the optional `qrcode` package is
-     installed: `pip install qrcode`)
-
-The secret never leaves this machine - nothing is sent anywhere. Afterwards:
-add TOTP_SECRET to .env and restart the frontend container. Without a
-TOTP_SECRET set, 2FA stays disabled.
-"""
-
 import pyotp
 
 ISSUER = "Starlink Monitor"

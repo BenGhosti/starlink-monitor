@@ -1,11 +1,3 @@
-/* dashboard.js - Starlink Monitor frontend
- * Angle convention (dome + compass): 0deg = North = up, clockwise.
- * See BACKEND_GUIDE / api-client.js for the data-fetching layer.
- */
-
-// ---------------------------------------------------------------------------
-// Colors
-// ---------------------------------------------------------------------------
 const COLORS = {
   green:  '#56d88f',
   cyan:   '#5ba3d0',
@@ -15,7 +7,6 @@ const COLORS = {
   text:   '#5a7390',
 };
 
-// Known Starlink alert bits (alerts_bitfield), per the standard grpc AlertsDish struct.
 const ALERT_BITS = [
   { bit: 0,  label: 'Motors stuck' },
   { bit: 1,  label: 'Thermal shutdown' },
@@ -31,13 +22,9 @@ const ALERT_BITS = [
   { bit: 11, label: 'Moving during update' },
 ];
 
-// Jitter thresholds for the overview tile (ms)
 const JITTER_WARN_MS = 10;
 const JITTER_ERR_MS = 30;
 
-// Custom Chart.js plugin: draws the active weather-warning intervals as
-// yellow bands behind the latency line. Bands are set per chart via
-// options.plugins.weatherBands = { bands: [{from,to} ms] }.
 const weatherBandPlugin = {
   id: 'weatherBands',
   beforeDatasetsDraw(chart) {
@@ -63,9 +50,6 @@ const weatherBandPlugin = {
 };
 Chart.register(weatherBandPlugin);
 
-// ---------------------------------------------------------------------------
-// Small utilities
-// ---------------------------------------------------------------------------
 function fmtNum(v, decimals = 1, suffix = '') {
   return v == null ? '–' : `${v.toFixed(decimals)}${suffix}`;
 }
@@ -90,23 +74,12 @@ function formatUptime(seconds) {
   return `${m}m`;
 }
 
-// All timestamps render via toLocaleString without an explicit timeZone,
-// so the browser renders in the user's local timezone. Chart.js x-axes get
-// ts*1000 (true UTC milliseconds) and the date-fns adapter also formats
-// locally (new Date(), no UTC getters) - both stay consistent.
 function formatLocalDateTime(ts, opts = {}) {
   return new Date(ts * 1000).toLocaleString('en-GB', {
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', ...opts,
   });
 }
 
-// ---------------------------------------------------------------------------
-// Data-fetching functions (fetchMetrics, fetchEvents, fetchSpeedtests,
-// fetchDishStatus, fetchWeatherCurrent, fetchStatsSummary, downloadCsv,
-// adminDelete) live in api-client.js, which must load before this file.
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
 const state = {
   ranges: { drop: '1d', latency: '1d', throughput: '1d', jitter: '1d', speedtest: 'all', peak: '1d', traffic: '7d' },
   liveMode: true,
@@ -114,8 +87,6 @@ const state = {
   wsReconnectTimer: null,
   charts: {},
   dome: { azimuth: null, elevation: null },
-  // Live jitter tracking: rolling 60s window for the tile + running bucket
-  // accumulators for the 1d chart (bucketS matches fetchJitter's 1d bucket).
   jitter: {
     prevLat: null, prevTs: null,
     window: [],
@@ -124,13 +95,9 @@ const state = {
   },
 };
 
-const MAX_LIVE_POINTS = 43200; // ~24h at 2s interval
+const MAX_LIVE_POINTS = 43200;
 const LIVE_TRIM_BATCH = 120;
 
-// ---------------------------------------------------------------------------
-// Time axis unit (minute/hour/day/month/year) is derived dynamically from
-// the actual span (from/to) - see pickTimeAxisUnit() in api-client.js.
-// ---------------------------------------------------------------------------
 function applyTimeAxis(chart, fromTs, toTs) {
   const cfg = pickTimeAxisUnit(fromTs, toTs);
   chart.options.scales.x.time.unit = cfg.unit;
@@ -181,9 +148,6 @@ function baseChartOptions(yLabel, opts = {}) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Sky View dome (Canvas 2D)
-// ---------------------------------------------------------------------------
 const dome = { canvas: null, ctx: null, size: 220 };
 
 function setupDomeCanvas() {
@@ -193,9 +157,6 @@ function setupDomeCanvas() {
   window.addEventListener('resize', debounce(sizeDomeCanvas, 200));
 }
 
-// Size is read from the actual rendered CSS box (getBoundingClientRect),
-// not a hardcoded constant - keeps the canvas buffer sharp and centered
-// at any width (e.g. smaller on narrow screens, max-width:100%).
 function sizeDomeCanvas() {
   const c = dome.canvas;
   if (!c) return;
@@ -215,8 +176,6 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
-// Angle convention (shared by dome + compass):
-// 0deg = North = up (12 o'clock), angles increase clockwise.
 function polarToXY(cx, cy, radius, azimuthDeg) {
   const rad = (azimuthDeg - 90) * (Math.PI / 180);
   return { x: cx + Math.cos(rad) * radius, y: cy + Math.sin(rad) * radius };
@@ -235,7 +194,6 @@ function drawDome() {
   ctx.fillStyle = '#0d1520';
   ctx.fill();
 
-  // Elevation rings (90=zenith/center, 0=horizon/outer edge)
   const elevSteps = [90, 75, 45, 25, 0];
   elevSteps.forEach((el, i) => {
     const r = ((90 - el) / 90) * R;
@@ -253,7 +211,6 @@ function drawDome() {
     }
   });
 
-  // Azimuth spokes every 45deg
   for (let az = 0; az < 360; az += 45) {
     const p = polarToXY(cx, cy, R, az);
     ctx.beginPath();
@@ -264,7 +221,6 @@ function drawDome() {
     ctx.stroke();
   }
 
-  // Cardinal directions
   const dirLabelR = R + Math.max(10, size * 0.05);
   [['N', 0], ['E', 90], ['S', 180], ['W', 270]].forEach(([label, az]) => {
     const p = polarToXY(cx, cy, dirLabelR, az);
@@ -275,7 +231,6 @@ function drawDome() {
     ctx.fillText(label, p.x, p.y);
   });
 
-  // Dish needle
   if (dome.azimuth != null && dome.elevation != null) {
     const r = ((90 - dome.elevation) / 90) * R;
     const p = polarToXY(cx, cy, r, dome.azimuth);
@@ -322,10 +277,6 @@ function updateDome(azimuth, elevation) {
   drawDome();
 }
 
-// The gRPC protocol no longer exposes the per-wedge obstruction map
-// (wedges_fraction_obstructed is obsoleted - see starlink_grpc.py), so the
-// dome can't draw actual clear/blocked sectors. Show the live obstruction
-// fraction instead - the total percentage is still provided by the dish.
 function setDomeObstruction(fraction) {
   const el = document.getElementById('domeObstrLabel');
   if (!el) return;
@@ -339,9 +290,6 @@ function setDomeObstruction(fraction) {
   el.style.color = pct > 0 ? '#e0566e' : '#5a7390';
 }
 
-// ---------------------------------------------------------------------------
-// Compass (SVG) - same angle convention as the dome
-// ---------------------------------------------------------------------------
 function setCompass(azimuth, elevation) {
   const needle = document.getElementById('compassNeedle');
   if (!needle) return;
@@ -354,9 +302,6 @@ function setCompass(azimuth, elevation) {
   needle.setAttribute('y2', p.y.toFixed(1));
 }
 
-// ---------------------------------------------------------------------------
-// Initialize charts
-// ---------------------------------------------------------------------------
 function initCharts() {
   state.charts.drop = new Chart(document.getElementById('dropChart'), {
     type: 'line',
@@ -517,13 +462,9 @@ function initCharts() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Event markers on charts
-// ---------------------------------------------------------------------------
 function applyEventMarkers(chart, events, typeFilter, color, resolutionS) {
   const dataset = chart.data.datasets[0];
   if (!dataset || !dataset.data.length) return;
-  // fetchEvents() returns newest-first - sort ascending to match dataset order
   const eventTimes = events.filter((e) => e.type === typeFilter).map((e) => e.ts * 1000).sort((a, b) => a - b);
   if (!eventTimes.length) {
     dataset.pointBackgroundColor = undefined;
@@ -533,9 +474,6 @@ function applyEventMarkers(chart, events, typeFilter, color, resolutionS) {
   }
   const toleranceMs = Math.max(60000, (resolutionS * 1000) / 2 + 30000);
   const bgColors = [], radii = [];
-  // Both dataset.data and eventTimes are ascending: a single pointer gives
-  // O(n+m) instead of the previous O(n*m) .some() per point (with 43k live
-  // points and many events that was the hottest loop in a range switch).
   let ei = 0;
   for (const d of dataset.data) {
     while (ei < eventTimes.length && eventTimes[ei] + toleranceMs < d.x) ei++;
@@ -548,17 +486,11 @@ function applyEventMarkers(chart, events, typeFilter, color, resolutionS) {
   chart.update();
 }
 
-// ---------------------------------------------------------------------------
-// Load metrics
-// ---------------------------------------------------------------------------
 async function loadMetrics(range, target) {
   const json = await fetchMetrics(range);
   const points = json.data;
   const isAgg = json.resolution_s > 2;
 
-  // null (not 0) for missing values so Chart.js draws a gap instead of a
-  // misleading zero-line during outages. The dish also reports -1 as a
-  // "no data" sentinel for latency - treat it as missing as well.
   const dropData = points.map((p) => ({ x: p.ts * 1000, y: p.ping_drop_rate != null ? p.ping_drop_rate * 100 : null }));
   const latencyData = points.map((p) => ({
     x: p.ts * 1000, y: p.ping_latency_ms != null && p.ping_latency_ms > 0 ? p.ping_latency_ms : null,
@@ -597,23 +529,20 @@ async function loadMetrics(range, target) {
     const events = await fetchEvents(range);
     if (target === 'drop' || target === 'both') applyEventMarkers(state.charts.drop, events, 'disconnect', COLORS.red, json.resolution_s);
     if (target === 'latency' || target === 'both') applyEventMarkers(state.charts.latency, events, 'latency_spike', COLORS.red, json.resolution_s);
-  } catch (_e) { /* markers are best-effort, not a hard error */ }
+  } catch (_e) { }
 
-  // Weather bands + correlation insight follow the latency chart's range.
   if (target === 'latency' || target === 'both') {
     loadWeatherBands(range).catch((_e) => {});
     loadWeatherInsight(range).catch((_e) => {});
   }
 }
 
-// Yellow bands on the latency chart for active weather warnings in the range.
 async function loadWeatherBands(range) {
   const intervals = await fetchWeatherWarningIntervals(range);
   state.charts.latency.options.plugins.weatherBands = { bands: intervals };
   state.charts.latency.update('none');
 }
 
-// "Latency during rain/storm vs. normal" insight card under the Quality charts.
 async function loadWeatherInsight(range) {
   const el = document.getElementById('weatherInsight');
   const c = await fetchWeatherCorrelation(range);
@@ -646,9 +575,6 @@ async function loadWeatherInsight(range) {
   `;
 }
 
-// ---------------------------------------------------------------------------
-// Jitter chart
-// ---------------------------------------------------------------------------
 async function loadJitter(range) {
   const json = await fetchJitter(range);
   const chart = state.charts.jitter;
@@ -657,8 +583,6 @@ async function loadJitter(range) {
   applyTimeAxis(chart, json.from, json.to);
   chart.update();
 
-  // Reset the live bucket accumulators so appended live points don't mix
-  // with a stale running bucket from a previous load.
   state.jitter.bucketTs = null;
   state.jitter.bucketSum = 0;
   state.jitter.bucketN = 0;
@@ -667,12 +591,6 @@ async function loadJitter(range) {
   if (basisEl) basisEl.textContent = `Basis: ${json.basis_label}`;
 }
 
-// ---------------------------------------------------------------------------
-// Load speedtests
-// ---------------------------------------------------------------------------
-// Short label for the bucket width of an aggregated point, e.g. "4-hr avg"
-// or "2-day avg" - adapts to the actual resolution instead of always
-// saying "daily avg".
 function bucketLabel(resolutionS) {
   if (resolutionS < 3600) return `${Math.round(resolutionS / 60)}-min avg`;
   if (resolutionS < 86400) return `${Math.round(resolutionS / 3600)}-hr avg`;
@@ -689,7 +607,6 @@ async function loadSpeedtests(range = 'all') {
 
   applyTimeAxis(chart, json.from, json.to);
 
-  // Index rows by timestamp for O(1) tooltip lookup instead of .find() per hover
   const byTs = new Map(rows.map((r) => [r.ts * 1000, r]));
   chart.options.plugins.tooltip.callbacks.label =
     (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} Mbit/s${isAgg ? ` (${label})` : ''}`;
@@ -711,9 +628,6 @@ async function loadSpeedtests(range = 'all') {
     isAgg ? `${rows.length} windows (${label})` : `${rows.length} tests`;
 }
 
-// ---------------------------------------------------------------------------
-// Traffic bar chart (down/up data volume in GB)
-// ---------------------------------------------------------------------------
 async function loadTraffic(range = '7d') {
   const json = await fetchTraffic(range);
   const rows = json.data;
@@ -732,9 +646,6 @@ async function loadTraffic(range = '7d') {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Peak-values tile (best values from 2s live sampling)
-// ---------------------------------------------------------------------------
 async function loadPeakStats(range = '1d') {
   const s = await fetchPeakStats(range);
   document.getElementById('peakLatency').textContent =
@@ -745,9 +656,6 @@ async function loadPeakStats(range = '1d') {
     s.peak_upload_bps != null ? `${(s.peak_upload_bps / 1e6).toFixed(1)} Mbit/s` : '– Mbit/s';
 }
 
-// ---------------------------------------------------------------------------
-// Stat tiles
-// ---------------------------------------------------------------------------
 function setStatLevel(el, value, warnThresh, errThresh, higherIsBad = true) {
   el.classList.remove('ok', 'warn', 'err', 'blue');
   let level = 'ok';
@@ -761,19 +669,14 @@ function setStatLevel(el, value, warnThresh, errThresh, higherIsBad = true) {
   el.classList.add(level);
 }
 
-// ---------------------------------------------------------------------------
-// Dish Health Score (fixed weights: drop 30%, latency 25%, obstruction 20%,
-// uptime 15%, alerts 10%). Each factor maps to a 0-100 sub-score, weighted
-// sum is the overall score. Runtime-only, no schema change.
-// ---------------------------------------------------------------------------
 function computeHealthScore(stats) {
   const clamp01 = (v) => Math.max(0, Math.min(1, v));
   const sub = {
-    drop: clamp01(1 - (stats.avg_drop_rate_24h ?? 1) / 0.05) * 100,     // 0% -> 100, >=5% -> 0
-    latency: clamp01(1 - (stats.avg_latency_ms_24h ?? 9999) / 200) * 100, // 0ms -> 100, >=200ms -> 0
-    obstr: clamp01(1 - (stats.avg_obstr_fraction_24h ?? 1) / 0.10) * 100, // 0% -> 100, >=10% -> 0
+    drop: clamp01(1 - (stats.avg_drop_rate_24h ?? 1) / 0.05) * 100,
+    latency: clamp01(1 - (stats.avg_latency_ms_24h ?? 9999) / 200) * 100,
+    obstr: clamp01(1 - (stats.avg_obstr_fraction_24h ?? 1) / 0.10) * 100,
     uptime: stats.uptime_pct_24h ?? 0,
-    alerts: Math.max(0, 100 - (stats.active_alerts ?? 0) * 25),        // each active alert: -25
+    alerts: Math.max(0, 100 - (stats.active_alerts ?? 0) * 25),
   };
   const score = Math.round(
     sub.drop * 0.30 + sub.latency * 0.25 + sub.obstr * 0.20 + sub.uptime * 0.15 + sub.alerts * 0.10,
@@ -832,9 +735,6 @@ async function loadSummary() {
   return stats;
 }
 
-// ---------------------------------------------------------------------------
-// Weather
-// ---------------------------------------------------------------------------
 const WMO_ICON = {
   0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️', 45: '🌫️', 48: '🌫️',
   51: '🌦️', 53: '🌦️', 55: '🌧️', 61: '🌧️', 63: '🌧️', 65: '🌧️',
@@ -846,7 +746,7 @@ async function loadWeather() {
   const w = await fetchWeatherCurrent();
   if (!w || !w.ts) return;
   const icon = WMO_ICON[w.wmo_code] ?? '·';
-  document.getElementById('weatherCity').textContent = 'Krefeld';  // adjust to your own location if you fork this
+  document.getElementById('weatherCity').textContent = 'Krefeld';
   document.getElementById('weatherMain').textContent =
     `${icon} ${fmtNum(w.temp_c, 0, ' °C')} · Wind ${fmtNum(w.wind_kmh, 0, ' km/h')}`;
   document.getElementById('weatherExtra').textContent =
@@ -856,9 +756,6 @@ async function loadWeather() {
   else { warnEl.style.display = 'none'; }
 }
 
-// ---------------------------------------------------------------------------
-// Dish status + device alerts
-// ---------------------------------------------------------------------------
 function renderAlerts(bitfield) {
   const grid = document.getElementById('alertGrid');
   const summary = document.getElementById('alertSummary');
@@ -923,9 +820,6 @@ async function loadDishStatus() {
   renderAlerts(d.alerts_bitfield);
 }
 
-// ---------------------------------------------------------------------------
-// Event log
-// ---------------------------------------------------------------------------
 function eventClassAndTag(type) {
   switch (type) {
     case 'disconnect':    return { cls: 'disc', tag: 'tag-err', label: 'Disconnect' };
@@ -938,7 +832,7 @@ function eventClassAndTag(type) {
 
 function formatEventMessage(ev) {
   let det = {};
-  try { det = JSON.parse(ev.details || '{}'); } catch (_e) { /* details optional */ }
+  try { det = JSON.parse(ev.details || '{}'); } catch (_e) { }
   switch (ev.type) {
     case 'disconnect':
       return `Connection lost${ev.duration_s ? ' · ' + ev.duration_s.toFixed(0) + ' s' : ''}${det.last_known_latency_ms ? ' · last latency ' + Math.round(det.last_known_latency_ms) + ' ms' : ''}`;
@@ -985,9 +879,6 @@ async function loadEvents() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// SLA statistics (History tab)
-// ---------------------------------------------------------------------------
 function fmtDurationSec(s) {
   if (s == null || !isFinite(s)) return '–';
   s = Math.round(s);
@@ -1025,29 +916,115 @@ async function loadSla() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Tab navigation + Snapshot (PNG download)
-// ---------------------------------------------------------------------------
+const HEATMAP_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const OUTAGE_COLORS = ['#10161f', 'rgba(224,86,110,.2)', 'rgba(224,86,110,.4)', 'rgba(224,86,110,.65)', 'rgba(224,86,110,.9)'];
+let _historyExtrasLoaded = false;
+
+function latencyColor(ms, min, max) {
+  if (ms == null) return '#0d1520';
+  const t = max > min ? (ms - min) / (max - min) : 0;
+  const hue = 145 * (1 - t);
+  return `hsl(${hue}, 55%, 42%)`;
+}
+
+function outageLevel(s) {
+  if (!s) return 0;
+  if (s < 300) return 1;
+  if (s < 1800) return 2;
+  if (s < 3600) return 3;
+  return 4;
+}
+
+function renderLatencyHeatmap(data) {
+  const grid = document.getElementById('latencyHeatmap');
+  const yEl = document.getElementById('latencyHeatmapY');
+  const xEl = document.getElementById('latencyHeatmapX');
+  const legendEl = document.getElementById('latencyHeatmapLegend');
+  if (!grid) return;
+
+  let min = Infinity, max = -Infinity;
+  for (const day of data) {
+    for (const c of day) {
+      if (c) { if (c.ms < min) min = c.ms; if (c.ms > max) max = c.ms; }
+    }
+  }
+  if (!isFinite(min)) {
+    grid.innerHTML = '<div class="event-empty">No latency data in this period.</div>';
+    return;
+  }
+
+  if (yEl) yEl.innerHTML = HEATMAP_DAYS.map((d) => `<span>${d}</span>`).join('');
+  if (xEl) {
+    xEl.innerHTML = Array.from({ length: 24 }, (_, h) =>
+      `<span>${h % 3 === 0 ? h : ''}</span>`).join('');
+  }
+
+  const cells = [];
+  for (let d = 0; d < 7; d++) {
+    for (let h = 0; h < 24; h++) {
+      const c = data[d][h];
+      const color = latencyColor(c ? c.ms : null, min, max);
+      const title = c
+        ? `${HEATMAP_DAYS[d]} ${String(h).padStart(2, '0')}:00 · ${Math.round(c.ms)} ms · ${c.n} samples`
+        : `${HEATMAP_DAYS[d]} ${String(h).padStart(2, '0')}:00 · no data`;
+      cells.push(`<div class="hm-cell" style="background:${color}" title="${title}"></div>`);
+    }
+  }
+  grid.innerHTML = cells.join('');
+
+  if (legendEl) {
+    legendEl.innerHTML =
+      `<span class="hm-legend-bar"></span> ${Math.round(min)} ms → ${Math.round(max)} ms`;
+  }
+}
+
+function renderOutageCalendar({ cells }) {
+  const grid = document.getElementById('outageCalendar');
+  const yEl = document.getElementById('outageCalendarY');
+  if (!grid) return;
+
+  if (yEl) {
+    yEl.innerHTML = ['Sun', '', 'Tue', '', 'Thu', '', 'Sat'].map((d) => `<span>${d}</span>`).join('');
+  }
+
+  grid.innerHTML = cells.map((c) => {
+    if (c.future) return '<div class="cal-cell future"></div>';
+    const level = outageLevel(c.downS);
+    const date = new Date(c.ts * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const title = c.downS ? `${date} · ${fmtDurationSec(c.downS)} downtime` : `${date} · no outage`;
+    return `<div class="cal-cell" style="background:${OUTAGE_COLORS[level]}" title="${title}"></div>`;
+  }).join('');
+}
+
+async function loadHistoryHeatmaps() {
+  if (_historyExtrasLoaded) return;
+  try {
+    const [lat, cal] = await Promise.all([fetchLatencyHeatmap(8), fetchOutageCalendar(16)]);
+    renderLatencyHeatmap(lat);
+    renderOutageCalendar(cal);
+    _historyExtrasLoaded = true;
+  } catch (e) {
+    console.error('History heatmaps failed:', e);
+  }
+}
+
 function initTabs() {
   const btns = document.querySelectorAll('.tab-btn');
   const pages = document.querySelectorAll('.tab-page');
   const activate = (name) => {
     btns.forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
     pages.forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
-    try { localStorage.setItem('sm_tab', name); } catch (_e) { /* private mode etc. */ }
-    // Charts in newly shown tabs need a resize pass (Chart.js also observes
-    // container resizes, this just makes the first paint immediate).
+    try { localStorage.setItem('sm_tab', name); } catch (_e) { }
     Object.values(state.charts).forEach((c) => {
-      if (c) { try { c.resize(); } catch (_e) { /* 0-size container is fine */ } }
+      if (c) { try { c.resize(); } catch (_e) { } }
     });
-    // The dome canvas reads its real CSS box size - if it was initialized
-    // while its tab was hidden it would be 1x1, so re-size on every switch.
     sizeDomeCanvas();
+    if (name === 'history') loadHistoryHeatmaps();
   };
   btns.forEach((b) => b.addEventListener('click', () => activate(b.dataset.tab)));
 
   let initial = 'overview';
-  try { initial = localStorage.getItem('sm_tab') || 'overview'; } catch (_e) { /* ignore */ }
+  try { initial = localStorage.getItem('sm_tab') || 'overview'; } catch (_e) { }
   if (![...btns].some((b) => b.dataset.tab === initial)) initial = 'overview';
   activate(initial);
 }
@@ -1086,14 +1063,9 @@ function initSnapshotButton() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Footer
-// ---------------------------------------------------------------------------
 async function loadFooter(stats) {
   try {
     const summaryStats = stats || await fetchStatsSummary();
-    // Only need the oldest timestamp here, not a full fetchMetrics('all')
-    // (which would return only ~TARGET_POINTS anyway due to bucketing).
     const [from] = await resolveRange('all');
     const days = Math.max(1, Math.round((Date.now() / 1000 - from) / 86400));
 
@@ -1108,9 +1080,6 @@ async function loadFooter(stats) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket + live mode
-// ---------------------------------------------------------------------------
 function setConnStatus(kind, latencyMs) {
   const pill = document.getElementById('connStatus');
   const text = document.getElementById('connText');
@@ -1131,7 +1100,7 @@ function connectWebSocket() {
   state.ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
   state.ws.onopen = () => setConnStatus('online');
   state.ws.onmessage = (e) => {
-    try { handleLivePoint(JSON.parse(e.data)); } catch (_err) { /* malformed frame, ignore */ }
+    try { handleLivePoint(JSON.parse(e.data)); } catch (_err) { }
   };
   state.ws.onclose = () => {
     setConnStatus('reconnecting');
@@ -1148,8 +1117,6 @@ function pushLivePoint(dataset, point) {
   }
 }
 
-// Live jitter: |Δ| to the previous sample updates the rolling 60s tile value
-// and (in 1d live mode) the running bucket at the right edge of the chart.
 function handleLiveJitter(point) {
   const lat = point.ping_latency_ms;
   if (lat == null || lat <= 0) return;
@@ -1158,7 +1125,6 @@ function handleLiveJitter(point) {
   if (j.prevLat != null && point.ts - j.prevTs <= 15) {
     const d = Math.abs(lat - j.prevLat);
 
-    // Tile: rolling 60s window
     const nowMs = Date.now();
     j.window.push({ t: nowMs, d });
     while (j.window.length && nowMs - j.window[0].t > 60000) j.window.shift();
@@ -1169,7 +1135,6 @@ function handleLiveJitter(point) {
       setStatLevel(el, jitterMs, JITTER_WARN_MS, JITTER_ERR_MS);
     }
 
-    // Chart: update the running bucket at the right edge
     if (state.liveMode && state.ranges.jitter === '1d') {
       const bTs = Math.floor(point.ts / j.bucketS) * j.bucketS;
       const data = state.charts.jitter.data.datasets[0].data;
@@ -1228,7 +1193,6 @@ function handleLivePoint(point) {
     }
   }
 
-  // Dish section + dome stay live regardless of chart live mode
   setCompass(point.direction_azimuth, point.direction_elevation);
   if (point.direction_azimuth != null || point.direction_elevation != null) {
     updateDome(point.direction_azimuth, point.direction_elevation);
@@ -1255,9 +1219,6 @@ function handleLivePoint(point) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Range buttons + live-mode toggle
-// ---------------------------------------------------------------------------
 function setLiveMode(on) {
   state.liveMode = on;
   const btn = document.getElementById('liveModeBtn');
@@ -1322,9 +1283,6 @@ function initRangeButtons() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// CSV export
-// ---------------------------------------------------------------------------
 function initExportButton() {
   const btn = document.getElementById('exportBtn');
   if (btn) {
@@ -1334,18 +1292,11 @@ function initExportButton() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Admin panel (data management)
-// ---------------------------------------------------------------------------
-// Normalizes the different admin-DELETE response shapes into a single
-// "rows deleted" count (metrics returns deleted_raw/deleted_minutely
-// instead of deleted; all returns a per-table breakdown object).
 function totalDeletedFromResponse(data) {
   if (typeof data.deleted === 'number') return data.deleted;
   if (data.deleted && typeof data.deleted === 'object') {
     return Object.values(data.deleted).reduce((a, b) => a + (Number(b) || 0), 0);
   }
-  // Fallback for /api/admin/metrics, which returns deleted_raw/deleted_minutely instead of deleted
   const rawKeys = Object.keys(data).filter((k) => k.startsWith('deleted'));
   if (rawKeys.length) {
     return rawKeys.reduce((sum, k) => sum + (Number(data[k]) || 0), 0);
@@ -1424,41 +1375,108 @@ function initAdminPanel() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
+const boot = {
+  start: performance.now(),
+  total: 0,
+  done: 0,
+  timer: null,
+};
+
+function bootSetStatus(text) {
+  const el = document.getElementById('bootStatus');
+  if (el) el.textContent = text;
+}
+
+function bootUpdateCounter() {
+  const el = document.getElementById('bootCounter');
+  if (!el) return;
+  const s = ((performance.now() - boot.start) / 1000).toFixed(1);
+  el.textContent = boot.total ? `${s}s · ${boot.done}/${boot.total}` : `${s}s`;
+}
+
+function bootStart(total) {
+  boot.total = total;
+  boot.timer = setInterval(bootUpdateCounter, 100);
+  bootUpdateCounter();
+}
+
+function bootTick() {
+  boot.done++;
+  const fill = document.getElementById('bootBarFill');
+  if (fill && boot.total) fill.style.width = `${(boot.done / boot.total) * 100}%`;
+  bootUpdateCounter();
+}
+
+function bootHide() {
+  if (boot.timer) clearInterval(boot.timer);
+  const overlay = document.getElementById('bootOverlay');
+  if (!overlay) return;
+  overlay.classList.add('done');
+  setTimeout(() => overlay.remove(), 600);
+}
+
+function bootError(msg) {
+  if (boot.timer) clearInterval(boot.timer);
+  bootSetStatus(msg);
+  const fill = document.getElementById('bootBarFill');
+  if (fill) {
+    fill.style.width = '100%';
+    fill.classList.add('err');
+  }
+}
+
 async function init() {
-  initCharts();
-  initRangeButtons();
-  initExportButton();
-  initAdminPanel();
-  initTabs();
-  initSnapshotButton();
-  setLiveMode(true);
+  bootStart(10);
+  bootSetStatus('Loading assets');
 
-  const results = await Promise.allSettled([
-    loadMetrics('1d', 'both'),
-    loadJitter('1d'),
-    loadSpeedtests(state.ranges.speedtest),
-    loadSummary(),
-    loadWeather(),
-    loadDishStatus(),
-    loadEvents(),
-    loadPeakStats(state.ranges.peak),
-    loadTraffic(state.ranges.traffic),
-    loadSla(),
-  ]);
+  try {
+    initCharts();
+    initRangeButtons();
+    initExportButton();
+    initAdminPanel();
+    initTabs();
+    initSnapshotButton();
+    setLiveMode(true);
 
-  const summaryResult = results[3];
-  await loadFooter(summaryResult.status === 'fulfilled' ? summaryResult.value : null);
+    bootSetStatus('Requesting data from endpoint');
 
-  connectWebSocket();
+    const track = (p) => p.then(
+      () => { bootTick(); },
+      () => { bootTick(); },
+    );
+    const results = await Promise.allSettled([
+      track(loadMetrics('1d', 'both')),
+      track(loadJitter('1d')),
+      track(loadSpeedtests(state.ranges.speedtest)),
+      track(loadSummary()),
+      track(loadWeather()),
+      track(loadDishStatus()),
+      track(loadEvents()),
+      track(loadPeakStats(state.ranges.peak)),
+      track(loadTraffic(state.ranges.traffic)),
+      track(loadSla()),
+    ]);
 
-  setInterval(loadSummary, 30000);
-  setInterval(loadWeather, 60000);
-  setInterval(loadDishStatus, 30000);
-  setInterval(loadEvents, 30000);
-  setInterval(() => loadPeakStats(state.ranges.peak), 30000);
+    bootSetStatus('Rendering');
+    const fill = document.getElementById('bootBarFill');
+    if (fill) fill.style.width = '100%';
+
+    const summaryResult = results[3];
+    await loadFooter(summaryResult.status === 'fulfilled' ? summaryResult.value : null);
+
+    connectWebSocket();
+
+    setInterval(loadSummary, 30000);
+    setInterval(loadWeather, 60000);
+    setInterval(loadDishStatus, 30000);
+    setInterval(loadEvents, 30000);
+    setInterval(() => loadPeakStats(state.ranges.peak), 30000);
+
+    setTimeout(bootHide, 450);
+  } catch (e) {
+    console.error('Init failed:', e);
+    bootError('Initialization failed - reload the page');
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

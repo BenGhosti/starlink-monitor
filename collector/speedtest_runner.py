@@ -1,24 +1,3 @@
-"""
-speedtest_runner.py
-Runs Ookla speedtests (via speedtest-cli) on a fixed daily schedule
-(SCHEDULE_HOURS_BERLIN, Europe/Berlin, DST-safe) instead of every 8h from
-process start.
-
-Sustained measurement: a browser/app-style Ookla test doesn't just grab one
-fixed chunk of data - it keeps multiple connections open for ~10-15s per
-direction so the link has time to ramp up to its real ceiling, then averages
-over the sustained portion (discarding the initial ramp-up). speedtest-cli's
-single download()/upload() call targets a fixed, comparatively small volume
-that a fast link (Starlink) can finish in 2-3 seconds, understating true
-throughput. To match real-world Ookla behavior we:
-  1. run one untimed warm-up round to let Starlink/TCP ramp up,
-  2. then repeat rounds until MIN_TEST_DURATION_S has elapsed,
-  3. average over total bytes / total time across those rounds.
-
-Writes results to `speedtests` plus a matching `events` row (type: speedtest)
-for the event log.
-"""
-
 import asyncio
 import json
 import logging
@@ -34,38 +13,29 @@ from db import get_db
 logger = logging.getLogger("speedtest_runner")
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
-SCHEDULE_HOURS_BERLIN = [0, 8, 16]  # daily, repeats
+SCHEDULE_HOURS_BERLIN = [0, 8, 16]
 MIN_TEST_DURATION_S = int(os.environ.get("SPEEDTEST_MIN_DURATION_S", "20"))
 WARMUP_S = int(os.environ.get("SPEEDTEST_WARMUP_S", "3"))
-MAX_TEST_ROUNDS = 40  # safety cap against infinite loops on very fast links
+MAX_TEST_ROUNDS = 40
 
 
 def _next_run_time(now_utc: datetime) -> datetime:
-    """Next SCHEDULE_HOURS_BERLIN slot after `now_utc` (Europe/Berlin, DST-safe)."""
     now_berlin = now_utc.astimezone(BERLIN_TZ)
     candidates = []
     for day_offset in (0, 1):
         day = (now_berlin + timedelta(days=day_offset)).date()
         for hour in SCHEDULE_HOURS_BERLIN:
             candidate = datetime(day.year, day.month, day.day, hour, 0, 0, tzinfo=BERLIN_TZ)
-            # 1s grace window: a container that (re)starts in the exact
-            # scheduled second must still catch the slot instead of silently
-            # skipping to the next one 8h later.
             if candidate >= now_berlin - timedelta(seconds=1):
                 candidates.append(candidate)
     target = min(candidates)
     if target < now_berlin:
-        # Grace-window hit: the slot just started - run it now instead of
-        # sleeping a negative/zero amount (which would tight-loop re-runs).
         target = now_berlin
     return target
 
 
 def _sustained_measure(st: "speedtest.Speedtest", run_once, bytes_attr: str) -> float:
-    """Runs one warm-up round (discarded), then repeats `run_once()` (st.download
-    or st.upload) until MIN_TEST_DURATION_S has elapsed, returning sustained
-    throughput in bit/s over the sum of the counted rounds."""
-    run_once()  # warm-up: lets Starlink and speedtest-cli's connections ramp up
+    run_once()
 
     total_bytes = 0
     total_time = 0.0
@@ -83,7 +53,6 @@ def _sustained_measure(st: "speedtest.Speedtest", run_once, bytes_attr: str) -> 
 
 
 def _run_speedtest_blocking() -> dict:
-    """speedtest-cli is synchronous/blocking, so this runs in an executor."""
     st = speedtest.Speedtest()
     st.get_best_server()
 
@@ -95,7 +64,7 @@ def _run_speedtest_blocking() -> dict:
         "download_mbit": download_bps / 1_000_000,
         "upload_mbit": upload_bps / 1_000_000,
         "latency_ms": results.get("ping"),
-        "jitter_ms": results.get("jitter"),  # not present in every speedtest-cli version
+        "jitter_ms": results.get("jitter"),
         "server": results.get("server", {}).get("name", "unknown"),
     }
 

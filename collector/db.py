@@ -1,10 +1,3 @@
-"""
-db.py
-Central SQLite setup for Starlink Monitor. Imported by every collector
-process (metrics, ping, weather, speedtest) and the cleanup job, so schema
-and pragmas live in exactly one place.
-"""
-
 import logging
 
 import aiosqlite
@@ -12,16 +5,8 @@ import aiosqlite
 DB_PATH = "/data/starlink.db"
 logger = logging.getLogger("db")
 
-# Collector poll interval (POLL_INTERVAL_S in metrics_collector.py). Kept
-# here so both the minutely aggregator and cleanup.py can compute a raw
-# row's traffic bytes as bps * interval / 8.
 RAW_SAMPLE_INTERVAL_S = 2
 
-# Tuned for sustained high-frequency writes (2s ticks) with concurrent reads
-# from the frontend container. WAL allows readers and the writer to run
-# concurrently; cache_size/mmap_size keep the hot (recent) part of the DB in
-# RAM; busy_timeout avoids "database is locked" errors on brief write/compress
-# overlaps instead of failing immediately.
 PRAGMAS = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -58,10 +43,6 @@ CREATE TABLE IF NOT EXISTS metrics (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_ts ON metrics(ts);
 
--- Static/rarely-changing dish info. Always exactly one row (id=1), kept
--- current by metrics_collector via UPSERT on every tick. Separate from
--- `metrics` so string fields (versions, device ID) don't get duplicated
--- into the high-frequency table tens of thousands of times a day.
 CREATE TABLE IF NOT EXISTS dish_info (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     device_id TEXT,
@@ -105,7 +86,6 @@ CREATE TABLE IF NOT EXISTS weather (
 );
 CREATE INDEX IF NOT EXISTS idx_weather_ts ON weather(ts);
 
--- Compressed hourly aggregates for raw data > 90 days old (see cleanup.py).
 CREATE TABLE IF NOT EXISTS metrics_hourly (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_hour INTEGER NOT NULL UNIQUE,
@@ -121,12 +101,6 @@ CREATE TABLE IF NOT EXISTS metrics_hourly (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_hourly_ts ON metrics_hourly(ts_hour);
 
--- Minute aggregates, filled continuously (not just after 90 days) with
--- min/max/avg for the main fields, so ranges >= 7d can build charts
--- straight from ready-made buckets instead of aggregating 2s raw data on
--- every request. down_bytes/up_bytes hold the minute's actual transferred
--- volume (SUM(bps) * RAW_SAMPLE_INTERVAL_S / 8), used by the traffic chart -
--- more accurate than avg_bps*60s since gaps are reflected via sample_count.
 CREATE TABLE IF NOT EXISTS metrics_minutely (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_minute INTEGER NOT NULL UNIQUE,
@@ -148,11 +122,6 @@ CREATE TABLE IF NOT EXISTS metrics_minutely (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_minutely_ts ON metrics_minutely(ts_minute);
 
--- Third compression tier for multi-year histories: cleanup.py rolls up
--- metrics_hourly rows older than HOURLY_ROLLUP_DAYS into daily buckets here
--- and deletes the source hourly rows. sample_count is the sum of the
--- underlying hourly sample_counts, so weighted averages stay correct across
--- rollup stages.
 CREATE TABLE IF NOT EXISTS metrics_daily (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_day INTEGER NOT NULL UNIQUE,
@@ -168,10 +137,6 @@ CREATE TABLE IF NOT EXISTS metrics_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_daily_ts ON metrics_daily(ts_day);
 
--- Persistent retry queue for Discord webhooks. If a send fails (e.g. the
--- internet uplink itself is down, not just the dish), the alert lands here
--- instead of being lost; discord_alert.py retries it in the background,
--- surviving container restarts (hence SQLite, not just in-memory).
 CREATE TABLE IF NOT EXISTS alert_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_ts INTEGER NOT NULL,
@@ -184,7 +149,6 @@ CREATE INDEX IF NOT EXISTS idx_alert_queue_created ON alert_queue(created_ts);
 
 
 async def init_db():
-    """Applies pragmas + schema. Idempotent; safe to call from any process at startup."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(PRAGMAS)
         await db.executescript(SCHEMA)
@@ -193,12 +157,6 @@ async def init_db():
         await db.commit()
 
 
-# Expected columns per table, for auto-migrating pre-existing databases.
-# CREATE TABLE IF NOT EXISTS only applies the full schema to a brand-new
-# table; on a table created by an older code version, missing columns would
-# otherwise stay missing forever with no visible error (inserts that don't
-# reference them just silently never populate them). ALTER TABLE ... ADD
-# COLUMN is a cheap, instant operation in SQLite (no table rewrite).
 EXPECTED_COLUMNS = {
     "metrics": {
         "uptime_s": "INTEGER",
@@ -235,7 +193,7 @@ EXPECTED_COLUMNS = {
 async def _run_migrations(db):
     for table, columns in EXPECTED_COLUMNS.items():
         async with db.execute(f"PRAGMA table_info({table})") as cur:
-            existing = {row[1] async for row in cur}  # row[1] = column name
+            existing = {row[1] async for row in cur}
 
         for col_name, col_type in columns.items():
             if col_name not in existing:
@@ -244,7 +202,6 @@ async def _run_migrations(db):
 
 
 async def get_db():
-    """New connection with the correct pragmas (for processes where init_db() already ran)."""
     db = await aiosqlite.connect(DB_PATH)
     await db.executescript(PRAGMAS)
     return db

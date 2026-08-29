@@ -1,10 +1,3 @@
-"""
-weather_poller.py
-Polls Open-Meteo (free, no API key) for the configured location every 10
-minutes. Writes to the `weather` table and sends a Discord alert on an
-active severe-weather warning (thunderstorm, storm-force wind).
-"""
-
 import asyncio
 import logging
 import time
@@ -17,7 +10,6 @@ from weather_state import set_last_weather
 
 logger = logging.getLogger("weather_poller")
 
-# Defaults to Krefeld, Germany - change to your own location if you fork this.
 LAT = 51.3388
 LON = 6.5853
 POLL_INTERVAL_S = 10 * 60
@@ -29,10 +21,9 @@ OPEN_METEO_URL = (
     "&timezone=Europe%2FBerlin"
 )
 
-# WMO codes treated as "severe weather" (thunderstorms, heavy snow/hail, etc.)
 THUNDERSTORM_CODES = {95, 96, 99}
 HEAVY_SNOW_CODES = {75, 86}
-WIND_WARNING_KMH = 50  # roughly Beaufort 7 (storm)
+WIND_WARNING_KMH = 50
 
 WMO_DESCRIPTIONS = {
     0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
@@ -116,7 +107,6 @@ async def run():
                 await insert_weather(db, row, warning)
                 set_last_weather(row["temp_c"], row["wind_kmh"], row["wmo_code"], warning)
 
-                # Only alert on a new/changed warning, not every 10 minutes
                 if warning and warning != last_warning_sent:
                     await send_alert(
                         title="⚡ Severe Weather Warning",
