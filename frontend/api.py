@@ -329,7 +329,9 @@ async def broadcast_loop(app: FastAPI):
                 dead = []
                 for ws in list(app.state.ws_clients):
                     try:
-                        await ws.send_text(payload)
+                        # Per-client send timeout: one slow/stalled client
+                        # must not block the broadcast for everyone else.
+                        await asyncio.wait_for(ws.send_text(payload), timeout=5.0)
                     except Exception:  # noqa: BLE001
                         dead.append(ws)
                 for ws in dead:

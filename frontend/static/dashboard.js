@@ -282,6 +282,23 @@ function updateDome(azimuth, elevation) {
   drawDome();
 }
 
+// The gRPC protocol no longer exposes the per-wedge obstruction map
+// (wedges_fraction_obstructed is obsoleted - see starlink_grpc.py), so the
+// dome can't draw actual clear/blocked sectors. Show the live obstruction
+// fraction instead - the total percentage is still provided by the dish.
+function setDomeObstruction(fraction) {
+  const el = document.getElementById('domeObstrLabel');
+  if (!el) return;
+  if (fraction == null) {
+    el.textContent = 'Obstruction –';
+    el.style.color = '#5a7390';
+    return;
+  }
+  const pct = fraction * 100;
+  el.textContent = `Obstruction ${pct.toFixed(2)} %`;
+  el.style.color = pct > 0 ? '#e0566e' : '#5a7390';
+}
+
 // ---------------------------------------------------------------------------
 // Compass (SVG) - same angle convention as the dome
 // ---------------------------------------------------------------------------
@@ -424,7 +441,8 @@ function initCharts() {
 function applyEventMarkers(chart, events, typeFilter, color, resolutionS) {
   const dataset = chart.data.datasets[0];
   if (!dataset || !dataset.data.length) return;
-  const eventTimes = events.filter((e) => e.type === typeFilter).map((e) => e.ts * 1000);
+  // fetchEvents() returns newest-first - sort ascending to match dataset order
+  const eventTimes = events.filter((e) => e.type === typeFilter).map((e) => e.ts * 1000).sort((a, b) => a - b);
   if (!eventTimes.length) {
     dataset.pointBackgroundColor = undefined;
     dataset.pointRadius = 0;
@@ -433,8 +451,13 @@ function applyEventMarkers(chart, events, typeFilter, color, resolutionS) {
   }
   const toleranceMs = Math.max(60000, (resolutionS * 1000) / 2 + 30000);
   const bgColors = [], radii = [];
+  // Both dataset.data and eventTimes are ascending: a single pointer gives
+  // O(n+m) instead of the previous O(n*m) .some() per point (with 43k live
+  // points and many events that was the hottest loop in a range switch).
+  let ei = 0;
   for (const d of dataset.data) {
-    const hit = eventTimes.some((t) => Math.abs(t - d.x) < toleranceMs);
+    while (ei < eventTimes.length && eventTimes[ei] + toleranceMs < d.x) ei++;
+    const hit = ei < eventTimes.length && eventTimes[ei] <= d.x + toleranceMs;
     bgColors.push(hit ? color : 'transparent');
     radii.push(hit ? 4 : 0);
   }
@@ -451,8 +474,14 @@ async function loadMetrics(range, target) {
   const points = json.data;
   const isAgg = json.resolution_s > 2;
 
-  const dropData = points.map((p) => ({ x: p.ts * 1000, y: (p.ping_drop_rate ?? 0) * 100 }));
-  const latencyData = points.map((p) => ({ x: p.ts * 1000, y: p.ping_latency_ms ?? 0, _min: p.min_latency, _max: p.max_latency }));
+  // null (not 0) for missing values so Chart.js draws a gap instead of a
+  // misleading zero-line during outages. The dish also reports -1 as a
+  // "no data" sentinel for latency - treat it as missing as well.
+  const dropData = points.map((p) => ({ x: p.ts * 1000, y: p.ping_drop_rate != null ? p.ping_drop_rate * 100 : null }));
+  const latencyData = points.map((p) => ({
+    x: p.ts * 1000, y: p.ping_latency_ms != null && p.ping_latency_ms > 0 ? p.ping_latency_ms : null,
+    _min: p.min_latency, _max: p.max_latency,
+  }));
   const downData = points.map((p) => ({
     x: p.ts * 1000, y: (p.downlink_bps ?? 0) / 1e6,
     _min: p.min_downlink != null ? p.min_downlink / 1e6 : null,
@@ -676,6 +705,7 @@ async function loadDishStatus() {
 
   setCompass(d.direction_azimuth, d.direction_elevation);
   updateDome(d.direction_azimuth, d.direction_elevation);
+  setDomeObstruction(d.obstr_fraction);
 
   document.getElementById('dishAzimuth').textContent = d.direction_azimuth != null ? `${d.direction_azimuth.toFixed(1)} °` : '– °';
   document.getElementById('dishElevation').textContent = d.direction_elevation != null ? `${d.direction_elevation.toFixed(1)} °` : '– °';
@@ -833,11 +863,11 @@ function handleLivePoint(point) {
 
   if (state.liveMode) {
     if (state.ranges.drop === '1d') {
-      pushLivePoint(state.charts.drop.data.datasets[0], { x: point.ts * 1000, y: (point.ping_drop_rate ?? 0) * 100 });
+      pushLivePoint(state.charts.drop.data.datasets[0], { x: point.ts * 1000, y: point.ping_drop_rate != null ? point.ping_drop_rate * 100 : null });
       state.charts.drop.update('none');
     }
     if (state.ranges.latency === '1d') {
-      pushLivePoint(state.charts.latency.data.datasets[0], { x: point.ts * 1000, y: point.ping_latency_ms ?? 0 });
+      pushLivePoint(state.charts.latency.data.datasets[0], { x: point.ts * 1000, y: point.ping_latency_ms != null && point.ping_latency_ms > 0 ? point.ping_latency_ms : null });
       state.charts.latency.update('none');
     }
     if (state.ranges.throughput === '1d') {
@@ -867,6 +897,7 @@ function handleLivePoint(point) {
   document.getElementById('obstrCurrent').innerHTML = yesNoSpan(point.currently_obstructed);
   if (point.obstr_fraction != null) {
     document.getElementById('obstrFraction').textContent = `${(point.obstr_fraction * 100).toFixed(2)} %`;
+    setDomeObstruction(point.obstr_fraction);
   }
   if (point.alerts_bitfield != null) {
     renderAlerts(point.alerts_bitfield);

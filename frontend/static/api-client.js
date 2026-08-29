@@ -468,26 +468,71 @@ async function fetchWeatherWarnings() {
   return raw.data.filter((r) => r.warning).slice(0, 20);
 }
 
+// Dish states that mean "the link is currently down" (used for ongoing-
+// outage detection in fetchStatsSummary). UNKNOWN/null are deliberately
+// excluded - some firmware versions report them during normal operation.
+const DOWN_STATES = new Set([
+  'SEARCHING', 'STOWED', 'BOOTING', 'THERMAL_SHUTDOWN',
+  'NO_SIGNAL', 'UPDATE', 'FACTORY_RESET', 'BOOTLOADER',
+]);
+
 async function fetchStatsSummary() {
   const now = Math.floor(Date.now() / 1000);
   const dayAgo = now - 24 * 3600;
 
-  const [metricsRows, disconnectRows, lastSpeedtestRaw] = await Promise.all([
-    fetchAllRaw('metrics', { from: dayAgo, to: now }),
+  // 24h averages come from metrics_minutely (1,440 rows) instead of the raw
+  // 2s table (43,200 rows) - called every 30s, the raw variant wasted
+  // megabytes of traffic per call. Fresh installs (<1h old) may not have
+  // minutely rows yet - fall back to raw for that window.
+  const [minuteRows, disconnectRows, lastSpeedtestRaw] = await Promise.all([
+    fetchAllRaw('metrics_minutely', { from: dayAgo, to: now }),
     fetchAllRaw('events', { from: dayAgo, to: now, filter_col: 'type', filter_val: 'disconnect' }),
     apiRaw('speedtests', { order: 'desc', limit: 1 }),
   ]);
 
-  const lat = metricsRows.filter((m) => m.ping_latency_ms != null).map((m) => m.ping_latency_ms);
-  const drop = metricsRows.filter((m) => m.ping_drop_rate != null).map((m) => m.ping_drop_rate);
-  const downtimeS = disconnectRows.reduce((sum, e) => sum + (e.duration_s || 0), 0);
+  let lat, drop;
+  if (minuteRows.length) {
+    lat = minuteRows.filter((m) => m.avg_ping_latency_ms != null).map((m) => m.avg_ping_latency_ms);
+    drop = minuteRows.filter((m) => m.avg_ping_drop_rate != null).map((m) => m.avg_ping_drop_rate);
+  } else {
+    const rawRows = await fetchAllRaw('metrics', { from: dayAgo, to: now });
+    lat = rawRows.filter((m) => m.ping_latency_ms != null && m.ping_latency_ms > 0).map((m) => m.ping_latency_ms);
+    drop = rawRows.filter((m) => m.ping_drop_rate != null).map((m) => m.ping_drop_rate);
+  }
+
+  // Only the part of each (ended) event inside the 24h window counts - an
+  // event whose duration started before the window must not fully count.
+  const endedDowntimeS = disconnectRows.reduce(
+    (sum, e) => sum + Math.min(e.duration_s || 0, e.ts - dayAgo),
+    0,
+  );
+
+  // Ongoing outage: no "ended" event exists yet, but the dish state in the
+  // newest raw row tells us the link is currently down. Find the last
+  // CONNECTED row to know when it went down.
+  const [latestRaw, lastConnectedRaw] = await Promise.all([
+    apiRaw('metrics', { order: 'desc', limit: 1 }),
+    apiRaw('metrics', { filter_col: 'state', filter_val: 'CONNECTED', order: 'desc', limit: 1 }),
+  ]);
+  const latestState = latestRaw.data[0]?.state;
+  let ongoingDowntimeS = 0;
+  if (latestState && DOWN_STATES.has(latestState)) {
+    const lastConnTs = lastConnectedRaw.data[0]?.ts;
+    if (lastConnTs == null) {
+      ongoingDowntimeS = 86400; // down for the entire window
+    } else {
+      ongoingDowntimeS = Math.max(0, Math.min(now - dayAgo, now - lastConnTs));
+    }
+  }
+
+  const totalDowntimeS = endedDowntimeS + ongoingDowntimeS;
   let uptimePct = 100.0;
-  if (downtimeS) uptimePct = Math.max(0, 100 - (downtimeS / 86400) * 100);
+  if (totalDowntimeS) uptimePct = Math.max(0, 100 - (totalDowntimeS / 86400) * 100);
 
   return {
     avg_latency_ms_24h: avgOf(lat),
     avg_drop_rate_24h: avgOf(drop),
-    disconnects_24h: disconnectRows.length,
+    disconnects_24h: disconnectRows.length + (ongoingDowntimeS > 0 ? 1 : 0),
     uptime_pct_24h: Math.round(uptimePct * 1000) / 1000,
     last_speedtest: lastSpeedtestRaw.data[0] || null,
   };
@@ -502,17 +547,66 @@ function csvEscape(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+// Export granularity per range: the finest tier whose row count stays
+// practical. Raw 2s rows exist for 90 days (cleanup.py), minutely for ~2
+// years, hourly/daily beyond. Events + speedtests are always exported raw.
+const CSV_TIER_BY_RANGE = {
+  '1d': 'raw', '7d': 'minutely', '14d': 'minutely', '1m': 'minutely',
+  '3m': 'minutely', '6m': 'hourly', '12m': 'hourly', all: 'hourly',
+};
+
+async function _fetchMetricsRowsForCsv(range) {
+  const [from, to] = await resolveRange(range);
+  const tier = CSV_TIER_BY_RANGE[range] || 'hourly';
+  const rows = [];
+
+  if (tier === 'raw') {
+    const raw = await fetchAllRaw('metrics', { from, to });
+    for (const r of raw) {
+      rows.push({ kind: 'metric_raw', ts: r.ts, drop: r.ping_drop_rate, lat: r.ping_latency_ms, obstr: r.obstr_fraction, down: r.downlink_bps, up: r.uplink_bps, state: r.state });
+    }
+  } else if (tier === 'minutely') {
+    const oldestMinuteTs = await _getOldestRow('metrics_minutely', 'ts_minute');
+    const min = await fetchAllRaw('metrics_minutely', { from: Math.max(from, oldestMinuteTs), to });
+    for (const r of min) {
+      rows.push({ kind: 'metric_min', ts: r.ts_minute, drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction, down: r.avg_downlink_bps, up: r.avg_uplink_bps });
+    }
+    if (from < oldestMinuteTs) {
+      const hrs = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
+      for (const r of hrs) {
+        if (r.ts_hour >= oldestMinuteTs) continue;
+        rows.push({ kind: 'metric_hour', ts: r.ts_hour, drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction, down: r.avg_downlink_bps, up: r.avg_uplink_bps });
+      }
+    }
+  } else {
+    const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
+    const hrs = await fetchAllRaw('metrics_hourly', { from: Math.max(from, oldestHourTs), to });
+    for (const r of hrs) {
+      rows.push({ kind: 'metric_hour', ts: r.ts_hour, drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction, down: r.avg_downlink_bps, up: r.avg_uplink_bps });
+    }
+    if (from < oldestHourTs) {
+      const days = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
+      for (const r of days) {
+        if (r.ts_day >= oldestHourTs) continue;
+        rows.push({ kind: 'metric_day', ts: r.ts_day, drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction, down: r.avg_downlink_bps, up: r.avg_uplink_bps });
+      }
+    }
+  }
+
+  return rows;
+}
+
 async function downloadCsv(range) {
   const [from, to] = await resolveRange(range);
-  const [metricsJson, events, speedtests] = await Promise.all([
-    fetchMetrics(range),
+  const [metricRows, events, speedtests] = await Promise.all([
+    _fetchMetricsRowsForCsv(range),
     fetchAllRaw('events', { from, to }),
     fetchAllRaw('speedtests', { from, to }),
   ]);
 
   const rows = [['kind', 'ts', 'field_1', 'field_2', 'field_3', 'field_4', 'field_5', 'field_6']];
-  for (const r of metricsJson.data) {
-    rows.push(['metric', r.ts, r.ping_drop_rate, r.ping_latency_ms, r.obstr_fraction, r.downlink_bps, r.uplink_bps, r.state]);
+  for (const r of metricRows) {
+    rows.push([r.kind, r.ts, r.drop, r.lat, r.obstr, r.down, r.up, r.state ?? '']);
   }
   for (const r of events) {
     rows.push(['event', r.ts, r.type, r.duration_s, r.details, '', '']);

@@ -89,7 +89,12 @@ async def run():
 
     # Disconnect tracking
     consecutive_failures = 0
-    disconnect_start: float | None = None  # only set once the threshold is crossed
+    # Set at the FIRST failure of the current streak: the outage actually
+    # starts there (packets are already being lost), so the logged duration
+    # includes the ~16s confirmation window. The confirmation threshold only
+    # decides whether the outage is logged/alerted at all - it must not
+    # shorten the reported duration.
+    disconnect_start: float | None = None
     disconnect_confirmed = False
     last_known_latency: float | None = None
 
@@ -108,8 +113,9 @@ async def run():
             if not reachable:
                 consecutive_failures += 1
                 if disconnect_start is None:
-                    # First failure in this streak - remember the time, but
-                    # don't count it as a disconnect until the threshold is hit.
+                    # First failure in this streak - the outage starts here
+                    # for duration purposes; it just isn't *logged* until
+                    # the confirmation threshold is hit below.
                     disconnect_start = time.monotonic()
 
                 if consecutive_failures >= DISCONNECT_CONFIRM_FAILURES and not disconnect_confirmed:

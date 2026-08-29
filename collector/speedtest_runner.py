@@ -48,9 +48,17 @@ def _next_run_time(now_utc: datetime) -> datetime:
         day = (now_berlin + timedelta(days=day_offset)).date()
         for hour in SCHEDULE_HOURS_BERLIN:
             candidate = datetime(day.year, day.month, day.day, hour, 0, 0, tzinfo=BERLIN_TZ)
-            if candidate > now_berlin:
+            # 1s grace window: a container that (re)starts in the exact
+            # scheduled second must still catch the slot instead of silently
+            # skipping to the next one 8h later.
+            if candidate >= now_berlin - timedelta(seconds=1):
                 candidates.append(candidate)
-    return min(candidates)
+    target = min(candidates)
+    if target < now_berlin:
+        # Grace-window hit: the slot just started - run it now instead of
+        # sleeping a negative/zero amount (which would tight-loop re-runs).
+        target = now_berlin
+    return target
 
 
 def _sustained_measure(st: "speedtest.Speedtest", run_once, bytes_attr: str) -> float:

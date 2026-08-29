@@ -37,6 +37,15 @@ RUN_INTERVAL_S = 24 * 60 * 60  # once a day
 HOUR_S = 3600
 DAY_S = 24 * HOUR_S
 
+# The compression passes commit in batches instead of one giant transaction:
+# in WAL mode the write lock is held from the first write until commit, so a
+# single transaction spanning months of data would block the 2s
+# metrics_collector writes until they hit busy_timeout and get lost. A batch
+# of 12 hours of raw data (or 7 days of hourly rows) takes only a few hundred
+# ms, so the live writer slips in between batches.
+BATCH_HOURS = 12
+BATCH_DAYS = 7
+
 
 async def compress_old_metrics(db):
     cutoff_ts = int(time.time()) - RETENTION_DAYS * 24 * HOUR_S
@@ -53,6 +62,7 @@ async def compress_old_metrics(db):
 
     compressed_hours = 0
     deleted_rows = 0
+    hours_since_commit = 0
 
     ts_hour = start_hour
     while ts_hour < end_hour:
@@ -102,6 +112,11 @@ async def compress_old_metrics(db):
             compressed_hours += 1
 
         ts_hour = next_hour
+        hours_since_commit += 1
+        if hours_since_commit >= BATCH_HOURS:
+            await db.commit()
+            await asyncio.sleep(0)  # let the 2s writer grab the lock before the next batch
+            hours_since_commit = 0
 
     await db.commit()
     # Deliberately no VACUUM here - it locks the whole DB exclusively and
@@ -133,6 +148,7 @@ async def compress_old_hourly(db):
 
     compressed_days = 0
     deleted_rows = 0
+    days_since_commit = 0
 
     ts_day = start_day
     while ts_day < end_day:
@@ -185,6 +201,11 @@ async def compress_old_hourly(db):
             compressed_days += 1
 
         ts_day = next_day
+        days_since_commit += 1
+        if days_since_commit >= BATCH_DAYS:
+            await db.commit()
+            await asyncio.sleep(0)
+            days_since_commit = 0
 
     await db.commit()
 
@@ -195,15 +216,34 @@ async def compress_old_hourly(db):
 
 
 async def cleanup_old_minutely(db):
-    """Deletes metrics_minutely rows older than MINUTELY_RETENTION_DAYS.
-    No compression (unlike compress_old_metrics) - metrics_hourly/
-    metrics_daily already cover that far back."""
+    """Deletes metrics_minutely rows older than MINUTELY_RETENTION_DAYS in
+    day-sized batches. No compression (unlike compress_old_metrics) -
+    metrics_hourly/metrics_daily already cover that far back. Chunked because
+    a single DELETE over ~1M rows would hold the WAL write lock for seconds
+    and stall the 2s metrics_collector writer the same way a giant
+    transaction would."""
     cutoff_ts = int(time.time()) - MINUTELY_RETENTION_DAYS * 24 * HOUR_S
-    cursor = await db.execute("DELETE FROM metrics_minutely WHERE ts_minute < ?", (cutoff_ts,))
-    await db.commit()
-    if cursor.rowcount:
+    deleted = 0
+    while True:
+        async with db.execute(
+            "SELECT MIN(ts_minute) FROM metrics_minutely WHERE ts_minute < ?", (cutoff_ts,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row or row[0] is None:
+            break
+
+        chunk_end = min(cutoff_ts, row[0] + DAY_S)
+        cur = await db.execute(
+            "DELETE FROM metrics_minutely WHERE ts_minute >= ? AND ts_minute < ?",
+            (row[0], chunk_end),
+        )
+        deleted += cur.rowcount
+        await db.commit()
+        await asyncio.sleep(0)
+
+    if deleted:
         logger.info("metrics_minutely cleanup: %s rows older than %s days deleted.",
-                     cursor.rowcount, MINUTELY_RETENTION_DAYS)
+                     deleted, MINUTELY_RETENTION_DAYS)
 
 
 async def run():

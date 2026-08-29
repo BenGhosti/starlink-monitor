@@ -8,14 +8,14 @@ A lightweight, self-hosted web dashboard and telemetry collector designed to mon
 
 ### Real-Time Dashboard
 * **Live Telemetry:** 2-second sampling rate for instant updates on **Ping Drop (%)**, **Latency (ms)**, and **Live Throughput (Mbit/s)**.
-* **Sky View Obstruction Map:** Visualizes the dish's field of view (North-oriented) mapping clear vs. obstructed satellite sectors.
+* **Sky View:** Visualizes the dish orientation (Azimuth & Elevation, North-oriented, center = zenith) together with the live obstruction fraction reported by the dish.
 * **Dish Hardware Telemetry:** Tracks physical orientation (Azimuth & Elevation), GPS status, SNR metrics, and hardware-level alarms.
 * **Outage Statistics:** Calculates 24-hour uptime, historical peaks, and tracks average obstruction durations/intervals.
 
 ### Data & Architecture
 * **gRPC Collector:** Highly efficient Python background worker utilizing Starlink's native gRPC interface.
 * **Optimized Storage:** SQLite database pre-configured with **WAL (Write-Ahead Logging)** mode for high-frequency time-series logging without performance degradation.
-* **Data Management Panel:** Built-in retention controls to easily purge or filter logs (older than 7, 30, or 90 days) directly from the UI, paired with raw CSV data export functionality.
+* **Data Management Panel:** Built-in retention controls to easily purge or filter logs (older than 7, 30, or 90 days) directly from the UI, paired with CSV data export at the finest available resolution per range (raw 2s samples for the last 24h, minutely/hourly/daily aggregates for longer ranges).
 * **Clean Design:** Developer-centric interface styled with high-contrast charts (Chart.js) and clean typography using *JetBrains Mono*.
 
 ---
