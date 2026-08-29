@@ -185,11 +185,19 @@ async def _connect_with_retry(max_attempts: int = 15, delay_s: float = 2.0):
 async def lifespan(app: FastAPI):
     app.state.db = await _connect_with_retry()
     app.state.db.row_factory = aiosqlite.Row
+    # Second connection dedicated to the WS broadcast loop. aiosqlite runs
+    # each connection on its own thread, but queries on the SAME connection
+    # serialize - without this, a heavy range query (e.g. a 50k-row page)
+    # queues the tiny "newest metrics row" poll behind it and live updates
+    # stutter for the duration of the load.
+    app.state.broadcast_db = await _connect_with_retry()
+    app.state.broadcast_db.row_factory = aiosqlite.Row
     app.state.ws_clients: set[WebSocket] = set()
     app.state.broadcaster_task = asyncio.create_task(broadcast_loop(app))
     yield
     app.state.broadcaster_task.cancel()
     await app.state.db.close()
+    await app.state.broadcast_db.close()
 
 
 app = FastAPI(title="Starlink Monitor API", lifespan=lifespan)
@@ -315,11 +323,13 @@ async def ws_live(websocket: WebSocket):
 
 
 async def broadcast_loop(app: FastAPI):
-    """Polls the newest metrics row every 2s and pushes it raw to all WS clients."""
+    """Polls the newest metrics row every 2s and pushes it raw to all WS clients.
+    Uses its own DB connection (app.state.broadcast_db) so heavy API queries
+    on the shared connection never delay the live feed."""
     last_ts_sent = 0
     while True:
         try:
-            async with app.state.db.execute(
+            async with app.state.broadcast_db.execute(
                 "SELECT * FROM metrics ORDER BY ts DESC LIMIT 1"
             ) as cur:
                 row = await cur.fetchone()

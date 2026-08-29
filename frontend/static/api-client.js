@@ -13,6 +13,13 @@ const TARGET_POINTS = 300;
 const RAW_METRICS_INTERVAL_S = 2;      // collector poll interval (metrics_collector.py)
 const RAW_SPEEDTEST_INTERVAL_S = 8 * 3600; // speedtest_runner.py interval
 
+// Long ranges must not pull the whole minutely table (up to ~1M rows) over
+// HTTP just to re-average it client-side into ~300 chart points. Up to this
+// span the minutely tier is used; beyond, charts aggregate from
+// metrics_hourly/metrics_daily directly (their bucket width is far below
+// the chart's resolution anyway, so the result is visually identical).
+const MINUTELY_MAX_SPAN_S = 30 * 86400;
+
 // Range key -> duration in seconds (null = "all", resolved dynamically
 // from the oldest available data).
 const RANGE_SECONDS = {
@@ -238,14 +245,63 @@ async function _fetchMetricsUncached(range) {
       min_uplink: r.min_uplink_bps, max_uplink: r.max_uplink_bps,
     }));
   } else {
-    // Bucket minutely rows into wider buckets; fall back to metrics_hourly
-    // before the oldest minutely row, then metrics_daily before the oldest
-    // hourly row (see HOURLY_ROLLUP_DAYS in cleanup.py).
-    const [minuteRows, oldestMinuteTs, oldestHourTs] = await Promise.all([
-      fetchAllRaw('metrics_minutely', { from, to }),
-      _getOldestRow('metrics_minutely', 'ts_minute'),
-      _getOldestRow('metrics_hourly', 'ts_hour'),
-    ]);
+    // Bucket aggregate rows into wider buckets. Which source tier depends on
+    // the span: minutely only up to MINUTELY_MAX_SPAN_S (the chart's
+    // ~300-point buckets still average dozens of minutes each), otherwise
+    // hourly (+daily fallback) directly. Ranges fall back before the oldest
+    // row of each tier (see HOURLY_ROLLUP_DAYS in cleanup.py).
+    const span = to - from;
+    const useMinutely = span <= MINUTELY_MAX_SPAN_S;
+    const oldestMinuteTs = useMinutely ? await _getOldestRow('metrics_minutely', 'ts_minute') : Infinity;
+    const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
+
+    const rows = [];
+    const pushMinutely = (r) => rows.push({
+      ts: r.ts_minute,
+      drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction,
+      down: r.avg_downlink_bps, up: r.avg_uplink_bps,
+      minLat: r.min_ping_latency_ms, maxLat: r.max_ping_latency_ms,
+      minDown: r.min_downlink_bps, maxDown: r.max_downlink_bps,
+      minUp: r.min_uplink_bps, maxUp: r.max_uplink_bps,
+    });
+    const pushHourly = (r) => rows.push({
+      ts: r.ts_hour,
+      drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction,
+      down: r.avg_downlink_bps, up: r.avg_uplink_bps,
+      minLat: null, maxLat: r.max_ping_latency_ms,
+      minDown: null, maxDown: null, minUp: null, maxUp: null,
+    });
+    const pushDaily = (r) => rows.push({
+      ts: r.ts_day,
+      drop: r.avg_ping_drop_rate, lat: r.avg_ping_latency_ms, obstr: r.avg_obstr_fraction,
+      down: r.avg_downlink_bps, up: r.avg_uplink_bps,
+      minLat: null, maxLat: r.max_ping_latency_ms,
+      minDown: null, maxDown: null, minUp: null, maxUp: null,
+    });
+
+    if (useMinutely) {
+      const minRows = await fetchAllRaw('metrics_minutely', { from, to });
+      minRows.forEach(pushMinutely);
+      if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
+        const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
+        for (const r of hourRows) {
+          if (r.ts_hour >= oldestMinuteTs) continue;
+          pushHourly(r);
+        }
+      }
+    } else {
+      const hourFrom = Number.isFinite(oldestHourTs) ? Math.max(from, oldestHourTs) : from;
+      const hourRows = await fetchAllRaw('metrics_hourly', { from: hourFrom, to });
+      hourRows.forEach(pushHourly);
+    }
+
+    if (Number.isFinite(oldestHourTs) && from < oldestHourTs) {
+      const dayRows = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
+      for (const r of dayRows) {
+        if (r.ts_day >= oldestHourTs) continue;
+        pushDaily(r);
+      }
+    }
 
     const buckets = new Map();
     const bucketOf = (ts) => {
@@ -263,44 +319,16 @@ async function _fetchMetricsUncached(range) {
       if (max != null) b[`max${key}`] = b[`max${key}`] == null ? max : Math.max(b[`max${key}`], max);
     };
 
-    for (const r of minuteRows) {
-      const b = bucketOf(r.ts_minute);
-      if (r.avg_ping_drop_rate != null) b.drop.push(r.avg_ping_drop_rate);
-      if (r.avg_ping_latency_ms != null) b.latency.push(r.avg_ping_latency_ms);
-      if (r.avg_obstr_fraction != null) b.obstr.push(r.avg_obstr_fraction);
-      if (r.avg_downlink_bps != null) b.down.push(r.avg_downlink_bps);
-      if (r.avg_uplink_bps != null) b.up.push(r.avg_uplink_bps);
-      mergeMinMax(b, 'Lat', r.min_ping_latency_ms, r.max_ping_latency_ms);
-      mergeMinMax(b, 'Down', r.min_downlink_bps, r.max_downlink_bps);
-      mergeMinMax(b, 'Up', r.min_uplink_bps, r.max_uplink_bps);
-    }
-
-    if (from < oldestMinuteTs) {
-      const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
-      for (const r of hourRows) {
-        if (r.ts_hour >= oldestMinuteTs) continue;
-        const b = bucketOf(r.ts_hour);
-        if (r.avg_ping_drop_rate != null) b.drop.push(r.avg_ping_drop_rate);
-        if (r.avg_ping_latency_ms != null) b.latency.push(r.avg_ping_latency_ms);
-        if (r.avg_obstr_fraction != null) b.obstr.push(r.avg_obstr_fraction);
-        if (r.avg_downlink_bps != null) b.down.push(r.avg_downlink_bps);
-        if (r.avg_uplink_bps != null) b.up.push(r.avg_uplink_bps);
-        mergeMinMax(b, 'Lat', null, r.max_ping_latency_ms);
-      }
-    }
-
-    if (from < oldestHourTs) {
-      const dayRows = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
-      for (const r of dayRows) {
-        if (r.ts_day >= oldestHourTs) continue;
-        const b = bucketOf(r.ts_day);
-        if (r.avg_ping_drop_rate != null) b.drop.push(r.avg_ping_drop_rate);
-        if (r.avg_ping_latency_ms != null) b.latency.push(r.avg_ping_latency_ms);
-        if (r.avg_obstr_fraction != null) b.obstr.push(r.avg_obstr_fraction);
-        if (r.avg_downlink_bps != null) b.down.push(r.avg_downlink_bps);
-        if (r.avg_uplink_bps != null) b.up.push(r.avg_uplink_bps);
-        mergeMinMax(b, 'Lat', null, r.max_ping_latency_ms);
-      }
+    for (const r of rows) {
+      const b = bucketOf(r.ts);
+      if (r.drop != null) b.drop.push(r.drop);
+      if (r.lat != null) b.latency.push(r.lat);
+      if (r.obstr != null) b.obstr.push(r.obstr);
+      if (r.down != null) b.down.push(r.down);
+      if (r.up != null) b.up.push(r.up);
+      mergeMinMax(b, 'Lat', r.minLat, r.maxLat);
+      mergeMinMax(b, 'Down', r.minDown, r.maxDown);
+      mergeMinMax(b, 'Up', r.minUp, r.maxUp);
     }
 
     data = Array.from(buckets.entries()).sort((a, b) => a[0] - b[0]).map(([ts, b]) => ({
@@ -351,24 +379,33 @@ async function fetchTraffic(range) {
       );
     }
   } else {
-    // Same cascade as fetchMetrics(): minutely -> hourly -> daily.
+    // Same tier rule + cascade as fetchMetrics(): minutely up to
+    // MINUTELY_MAX_SPAN_S, hourly/daily directly for longer ranges.
+    const useMinutely = (to - from) <= MINUTELY_MAX_SPAN_S;
     const [oldestMinuteTs, oldestHourTs] = await Promise.all([
-      _getOldestRow('metrics_minutely', 'ts_minute'),
+      useMinutely ? _getOldestRow('metrics_minutely', 'ts_minute') : Promise.resolve(Infinity),
       _getOldestRow('metrics_hourly', 'ts_hour'),
     ]);
 
-    const minuteFrom = Number.isFinite(oldestMinuteTs) ? Math.max(from, oldestMinuteTs) : from;
-    const minuteRows = await fetchAllRaw('metrics_minutely', { from: minuteFrom, to });
-    for (const r of minuteRows) addBytes(r.ts_minute, r.down_bytes, r.up_bytes);
+    if (useMinutely) {
+      const minuteFrom = Number.isFinite(oldestMinuteTs) ? Math.max(from, oldestMinuteTs) : from;
+      const minuteRows = await fetchAllRaw('metrics_minutely', { from: minuteFrom, to });
+      for (const r of minuteRows) addBytes(r.ts_minute, r.down_bytes, r.up_bytes);
 
-    if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
-      const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
-      for (const r of hourRows) {
-        if (r.ts_hour >= oldestMinuteTs) continue;
-        addBytes(r.ts_hour, r.down_bytes, r.up_bytes);
+      if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
+        const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
+        for (const r of hourRows) {
+          if (r.ts_hour >= oldestMinuteTs) continue;
+          addBytes(r.ts_hour, r.down_bytes, r.up_bytes);
+        }
       }
+    } else {
+      const hourFrom = Number.isFinite(oldestHourTs) ? Math.max(from, oldestHourTs) : from;
+      const hourRows = await fetchAllRaw('metrics_hourly', { from: hourFrom, to });
+      for (const r of hourRows) addBytes(r.ts_hour, r.down_bytes, r.up_bytes);
     }
-    if (from < oldestHourTs) {
+
+    if (Number.isFinite(oldestHourTs) && from < oldestHourTs) {
       const dayRows = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
       for (const r of dayRows) {
         if (r.ts_day >= oldestHourTs) continue;
@@ -698,19 +735,41 @@ async function fetchJitter(range) {
       }
     }
   } else {
-    const oldestMinuteTs = await _getOldestRow('metrics_minutely', 'ts_minute');
-    const minFrom = Number.isFinite(oldestMinuteTs) ? Math.max(from, oldestMinuteTs) : from;
-    const minRows = await fetchAllRaw('metrics_minutely', { from: minFrom, to });
-    for (const r of minRows) {
-      if (r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
-        entries.push({ ts: r.ts_minute, lat: r.avg_ping_latency_ms, basis: 'minute' });
+    const useMinutely = (to - from) <= MINUTELY_MAX_SPAN_S;
+    if (useMinutely) {
+      const oldestMinuteTs = await _getOldestRow('metrics_minutely', 'ts_minute');
+      const minFrom = Number.isFinite(oldestMinuteTs) ? Math.max(from, oldestMinuteTs) : from;
+      const minRows = await fetchAllRaw('metrics_minutely', { from: minFrom, to });
+      for (const r of minRows) {
+        if (r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
+          entries.push({ ts: r.ts_minute, lat: r.avg_ping_latency_ms, basis: 'minute' });
+        }
       }
-    }
-    if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
+      if (Number.isFinite(oldestMinuteTs) && from < oldestMinuteTs) {
+        const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
+        const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
+        for (const r of hourRows) {
+          if (r.ts_hour < oldestMinuteTs && r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
+            entries.push({ ts: r.ts_hour, lat: r.avg_ping_latency_ms, basis: 'hour' });
+          }
+        }
+        if (Number.isFinite(oldestHourTs) && from < oldestHourTs) {
+          const dayRows = await fetchAllRaw('metrics_daily', { from, to: Math.min(to, oldestHourTs) });
+          for (const r of dayRows) {
+            if (r.ts_day < oldestHourTs && r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
+              entries.push({ ts: r.ts_day, lat: r.avg_ping_latency_ms, basis: 'day' });
+            }
+          }
+        }
+      }
+    } else {
+      // Long range: hourly (+daily fallback) deltas only - pulling the whole
+      // minutely history would dominate the load time for no visual gain.
       const oldestHourTs = await _getOldestRow('metrics_hourly', 'ts_hour');
-      const hourRows = await fetchAllRaw('metrics_hourly', { from, to: Math.min(to, oldestMinuteTs) });
+      const hourFrom = Number.isFinite(oldestHourTs) ? Math.max(from, oldestHourTs) : from;
+      const hourRows = await fetchAllRaw('metrics_hourly', { from: hourFrom, to });
       for (const r of hourRows) {
-        if (r.ts_hour < oldestMinuteTs && r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
+        if (r.avg_ping_latency_ms != null && r.avg_ping_latency_ms > 0) {
           entries.push({ ts: r.ts_hour, lat: r.avg_ping_latency_ms, basis: 'hour' });
         }
       }
