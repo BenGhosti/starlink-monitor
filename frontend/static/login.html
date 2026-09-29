@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sign In · Starlink Monitor</title>
+<meta name="robots" content="noindex, nofollow">
+<title>Sign In · Dish Monitor</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-<link rel="stylesheet" href="/static/login.css?v=5">
+<link rel="stylesheet" href="/static/login.css?v=6">
 </head>
 <body>
   <div class="login-scene">
@@ -20,7 +21,7 @@
 
     <form class="login-card" id="loginForm" autocomplete="off">
       <div class="login-brand">
-        <span class="login-logo">Starlink Monitor</span>
+        <span class="login-logo">Dish Monitor</span>
         <span class="login-sub">Dashboard Access</span>
       </div>
 
@@ -41,10 +42,12 @@
 
       <button type="submit" class="login-submit" id="loginSubmit">Sign In</button>
 
+      <div class="login-disclaimer">Private self-hosted tool. Not affiliated with SpaceX or Starlink.</div>
+
       <div class="login-error" id="loginError" style="display:none"></div>
     </form>
 
-    <div class="login-footer">Starlink Monitor by <a href="https://ben-ghosti.de" target="_blank" rel="noopener">Ben Ghosti</a></div>
+    <div class="login-footer">Dish Monitor by <a href="https://ben-ghosti.de" target="_blank" rel="noopener">Ben Ghosti</a> · unofficial</div>
   </div>
 
 <script defer src="/static/login.js?v=5"></script>

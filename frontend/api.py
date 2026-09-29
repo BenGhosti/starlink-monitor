@@ -14,7 +14,7 @@ import aiosqlite
 import pydantic
 import pyotp
 from fastapi import FastAPI, Request, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [api] %(levelname)s %(message)s")
@@ -152,7 +152,20 @@ async def lifespan(app: FastAPI):
     await app.state.broadcast_db.close()
 
 
-app = FastAPI(title="Starlink Monitor API", lifespan=lifespan)
+app = FastAPI(
+    title="Starlink Monitor API",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+@app.middleware("http")
+async def add_robots_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
 
 
 def _require_table(table: str) -> str:
@@ -172,6 +185,11 @@ async def _valid_columns(db, table: str) -> set[str]:
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/robots.txt")
+async def robots_txt():
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
 
 @app.get("/favicon.ico")
