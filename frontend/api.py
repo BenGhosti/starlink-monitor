@@ -21,7 +21,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [api] %(levelname)s 
 logger = logging.getLogger("api")
 
 DB_PATH = "/data/starlink.db"
-STATIC_DIR = Path(__file__).parent / "static"
+FRONTEND_DIR = Path(__file__).parent
+STATIC_DIR = FRONTEND_DIR / "static"
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "changeme")
@@ -393,7 +394,7 @@ async def root(request: Request):
     username = verify_session_cookie(request.cookies.get(COOKIE_NAME))
     if username is None:
         return RedirectResponse(url="/login")
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
