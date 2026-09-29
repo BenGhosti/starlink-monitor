@@ -2,6 +2,8 @@
 
 A lightweight, self-hosted web dashboard and telemetry collector designed to monitor Starlink connection quality, satellite tracking, and dish hardware performance in real-time. Optimized for Unraid and Docker environments.
 
+**Unofficial community project. Not affiliated with SpaceX or Starlink.**
+
 ---
 
 ## 📊 Features
