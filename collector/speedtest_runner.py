@@ -4,6 +4,7 @@ import logging
 import os
 import statistics
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -20,6 +21,8 @@ MIN_TEST_DURATION_S = int(os.environ.get("SPEEDTEST_MIN_DURATION_S", "20"))
 WARMUP_S = int(os.environ.get("SPEEDTEST_WARMUP_S", "3"))
 MAX_TEST_ROUNDS = 40
 LATENCY_PROBES = int(os.environ.get("SPEEDTEST_LATENCY_PROBES", "10"))
+SERVER_ID = os.environ.get("SPEEDTEST_SERVER_ID", "").strip()
+SERVER_URL = os.environ.get("SPEEDTEST_SERVER_URL", "").strip()
 
 
 def _measure_latency_and_jitter(base_url: str) -> tuple[float | None, float | None]:
@@ -53,6 +56,54 @@ def _measure_latency_and_jitter(base_url: str) -> tuple[float | None, float | No
     deltas = [abs(b - a) for a, b in zip(samples, samples[1:])]
     jitter_ms = statistics.fmean(deltas) if deltas else 0.0
     return round(latency_ms, 1), round(jitter_ms, 1)
+
+
+def _pinned_server() -> dict | None:
+    """Server entry for a manually pinned speedtest server, if configured."""
+    if not SERVER_URL:
+        return None
+    host = urllib.parse.urlsplit(SERVER_URL).netloc or SERVER_URL
+    return {
+        "id": SERVER_ID or "pinned",
+        "name": host,
+        "sponsor": "pinned",
+        "cc": "",
+        "url": SERVER_URL,
+        "d": 0,
+    }
+
+
+def _configure_best_server(st: "speedtest.Speedtest") -> None:
+    """Select the speedtest server.
+
+    A server pinned via SPEEDTEST_SERVER_URL (+ optional SPEEDTEST_SERVER_ID)
+    is used directly. Otherwise SPEEDTEST_SERVER_ID may still match
+    speedtest-cli's own server list. Without a pin, speedtest-cli's geo-based
+    auto selection is used - note that Starlink CGNAT GeoIP can place the
+    client in a completely different region, making results vary between runs.
+    """
+    pinned = _pinned_server()
+    if pinned:
+        st.get_best_server([pinned])
+        logger.info("Using pinned speedtest server: %s (%s)", pinned["id"], pinned["url"])
+        return
+
+    if SERVER_ID:
+        try:
+            matches = [s for lst in st.get_servers([SERVER_ID]).values() for s in lst]
+            if matches:
+                st.get_best_server(matches)
+                return
+            logger.warning(
+                "SPEEDTEST_SERVER_ID=%s not found - falling back to auto selection",
+                SERVER_ID,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "SPEEDTEST_SERVER_ID=%s lookup failed - falling back to auto selection",
+                SERVER_ID,
+            )
+    st.get_best_server()
 
 
 def _next_run_time(now_utc: datetime) -> datetime:
@@ -90,7 +141,7 @@ def _sustained_measure(st: "speedtest.Speedtest", run_once, bytes_attr: str) -> 
 
 def _run_speedtest_blocking() -> dict:
     st = speedtest.Speedtest()
-    st.get_best_server()
+    _configure_best_server(st)
 
     # Own RTT/jitter probes before any load is applied
     server_url = os.path.dirname(st.best["url"])
@@ -160,8 +211,8 @@ async def run():
             result = await run_speedtest()
             if result is not None:
                 logger.info(
-                    "Speedtest: %.1f Mbit/s down, %.1f Mbit/s up, %.0f ms latency, %.1f ms jitter",
-                    result["download_mbit"], result["upload_mbit"],
+                    "Speedtest @ %s: %.1f Mbit/s down, %.1f Mbit/s up, %.0f ms latency, %.1f ms jitter",
+                    result["server"], result["download_mbit"], result["upload_mbit"],
                     result["latency_ms"] or 0, result["jitter_ms"] or 0,
                 )
                 await insert_speedtest(db, result)
