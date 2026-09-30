@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import statistics
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -17,6 +19,40 @@ SCHEDULE_HOURS_BERLIN = [0, 8, 16]
 MIN_TEST_DURATION_S = int(os.environ.get("SPEEDTEST_MIN_DURATION_S", "20"))
 WARMUP_S = int(os.environ.get("SPEEDTEST_WARMUP_S", "3"))
 MAX_TEST_ROUNDS = 40
+LATENCY_PROBES = int(os.environ.get("SPEEDTEST_LATENCY_PROBES", "10"))
+
+
+def _measure_latency_and_jitter(base_url: str) -> tuple[float | None, float | None]:
+    """Measure true round-trip latency and jitter against a speedtest server.
+
+    speedtest-cli's own ping value divides 3 samples by 6 (see
+    Speedtest.get_best_server), which reports roughly half the real RTT, and it
+    provides no jitter at all. We probe latency.txt ourselves: one discarded
+    warm-up request, then LATENCY_PROBES measured ones over fresh connections.
+    Latency = mean RTT (ms); jitter = mean absolute delta between consecutive
+    samples (same definition the dashboard uses for its live jitter).
+    """
+    if not base_url.startswith(("http://", "https://")):
+        return None, None
+    samples: list[float] = []
+    for i in range(LATENCY_PROBES + 1):
+        url = f"{base_url.rstrip('/')}/latency.txt?x={int(time.time() * 1000)}.{i}"
+        request = urllib.request.Request(url, headers={"User-Agent": "speedtest-cli/2.1.3"})
+        start = time.perf_counter()
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                response.read(9)
+        except Exception:  # noqa: BLE001
+            continue
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        if i > 0:  # first probe is warm-up (DNS/connection setup)
+            samples.append(elapsed_ms)
+    if not samples:
+        return None, None
+    latency_ms = statistics.fmean(samples)
+    deltas = [abs(b - a) for a, b in zip(samples, samples[1:])]
+    jitter_ms = statistics.fmean(deltas) if deltas else 0.0
+    return round(latency_ms, 1), round(jitter_ms, 1)
 
 
 def _next_run_time(now_utc: datetime) -> datetime:
@@ -56,16 +92,21 @@ def _run_speedtest_blocking() -> dict:
     st = speedtest.Speedtest()
     st.get_best_server()
 
+    # Own RTT/jitter probes before any load is applied
+    server_url = os.path.dirname(st.best["url"])
+    latency_ms, jitter_ms = _measure_latency_and_jitter(server_url)
+    if latency_ms is None:
+        latency_ms = st.results.ping  # fallback: speedtest-cli value (roughly half the RTT)
+
     download_bps = _sustained_measure(st, st.download, "bytes_received")
     upload_bps = _sustained_measure(st, st.upload, "bytes_sent")
-    results = st.results.dict()
 
     return {
         "download_mbit": download_bps / 1_000_000,
         "upload_mbit": upload_bps / 1_000_000,
-        "latency_ms": results.get("ping"),
-        "jitter_ms": results.get("jitter"),
-        "server": results.get("server", {}).get("name", "unknown"),
+        "latency_ms": latency_ms,
+        "jitter_ms": jitter_ms,
+        "server": st.results.server.get("name", "unknown"),
     }
 
 
@@ -119,8 +160,9 @@ async def run():
             result = await run_speedtest()
             if result is not None:
                 logger.info(
-                    "Speedtest: %.1f Mbit/s down, %.1f Mbit/s up, %.0f ms",
-                    result["download_mbit"], result["upload_mbit"], result["latency_ms"] or 0,
+                    "Speedtest: %.1f Mbit/s down, %.1f Mbit/s up, %.0f ms latency, %.1f ms jitter",
+                    result["download_mbit"], result["upload_mbit"],
+                    result["latency_ms"] or 0, result["jitter_ms"] or 0,
                 )
                 await insert_speedtest(db, result)
     finally:
