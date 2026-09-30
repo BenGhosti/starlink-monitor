@@ -44,7 +44,11 @@ form.addEventListener('submit', async (e) => {
 
     if (res.ok) {
       const params = new URLSearchParams(window.location.search);
-      window.location.href = params.get('next') || '/';
+      const next = params.get('next') || '';
+      const safeNext = next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\')
+        ? next
+        : '/';
+      window.location.href = safeNext;
       return;
     }
 

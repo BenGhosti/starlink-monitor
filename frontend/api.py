@@ -10,6 +10,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiosqlite
 import pydantic
@@ -28,9 +29,9 @@ STATIC_DIR = FRONTEND_DIR / "static"
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "changeme")
 
-if ADMIN_PASS == "changeme":
+if ADMIN_PASS in ("changeme", "change-me") or not ADMIN_PASS:
     logger.warning(
-        "ADMIN_PASS is still the default 'changeme' - change it in .env for production!"
+        "ADMIN_PASS is still a default or empty value - set a strong password in .env!"
     )
 
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip()
@@ -87,6 +88,16 @@ def _is_https_request(request: Request) -> bool:
         return True
     forwarded_proto = request.headers.get("x-forwarded-proto", "")
     return forwarded_proto.split(",")[0].strip().lower() == "https"
+
+
+def _ws_origin_allowed(websocket: WebSocket) -> bool:
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return True  # non-browser clients (scripts, monitors) send no Origin
+    parsed = urlsplit(origin)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    return parsed.netloc == websocket.headers.get("host", "")
 
 
 LOGIN_MAX_ATTEMPTS = 5
@@ -205,10 +216,25 @@ app = FastAPI(
 )
 
 
+SECURITY_HEADERS = {
+    "X-Robots-Tag": "noindex, nofollow",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    ),
+}
+
+
 @app.middleware("http")
-async def add_robots_header(request: Request, call_next):
+async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
-    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    for name, value in SECURITY_HEADERS.items():
+        response.headers[name] = value
     return response
 
 
@@ -302,6 +328,9 @@ async def ws_live(websocket: WebSocket):
     username = verify_session_cookie(websocket.cookies.get(COOKIE_NAME))
     if username is None:
         await websocket.close(code=4401)
+        return
+    if not _ws_origin_allowed(websocket):
+        await websocket.close(code=4403)
         return
 
     await websocket.accept()

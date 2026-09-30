@@ -820,6 +820,12 @@ async function loadDishStatus() {
   renderAlerts(d.alerts_bitfield);
 }
 
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 function eventClassAndTag(type) {
   switch (type) {
     case 'disconnect':    return { cls: 'disc', tag: 'tag-err', label: 'Disconnect' };
@@ -855,8 +861,8 @@ async function loadEvents() {
           const { cls, tag, label } = eventClassAndTag(ev.type);
           return `<div class="event ${cls}">
             <span class="event-time">${formatLocalDateTime(ev.ts, { second: '2-digit' })}</span>
-            <span class="event-msg">${formatEventMessage(ev)}</span>
-            <span class="event-tag ${tag}">${label}</span>
+            <span class="event-msg">${escapeHtml(formatEventMessage(ev))}</span>
+            <span class="event-tag ${tag}">${escapeHtml(label)}</span>
           </div>`;
         }).join('');
     list.innerHTML = html;
@@ -869,13 +875,13 @@ async function loadEvents() {
             const { cls, tag, label } = eventClassAndTag(ev.type);
             return `<div class="event ${cls}">
               <span class="event-time">${formatLocalDateTime(ev.ts, { second: '2-digit' })}</span>
-              <span class="event-msg">${formatEventMessage(ev)}</span>
-              <span class="event-tag ${tag}">${label}</span>
+              <span class="event-msg">${escapeHtml(formatEventMessage(ev))}</span>
+              <span class="event-tag ${tag}">${escapeHtml(label)}</span>
             </div>`;
           }).join('');
     }
   } catch (e) {
-    list.innerHTML = `<div class="event-empty" style="color:#e0566e">Error loading events: ${e.message}</div>`;
+    list.innerHTML = `<div class="event-empty" style="color:#e0566e">Error loading events: ${escapeHtml(e.message)}</div>`;
   }
 }
 
