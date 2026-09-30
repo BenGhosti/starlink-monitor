@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -45,6 +46,48 @@ SESSION_TTL_S = 12 * 3600
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 
 TOTP_SECRET = os.environ.get("TOTP_SECRET", "").strip()
+
+LAN_FALLBACK_PIN = os.environ.get("LAN_FALLBACK_PIN", "").strip()
+LAN_FALLBACK_CIDRS = [
+    c.strip() for c in os.environ.get("LAN_FALLBACK_CIDRS", "").split(",") if c.strip()
+]
+try:
+    LAN_FALLBACK_NETWORKS = [
+        ipaddress.ip_network(c, strict=False) for c in LAN_FALLBACK_CIDRS
+    ]
+except ValueError as exc:
+    raise RuntimeError(f"Invalid network in LAN_FALLBACK_CIDRS: {exc}") from exc
+
+if LAN_FALLBACK_PIN and not LAN_FALLBACK_NETWORKS:
+    logger.warning(
+        "LAN_FALLBACK_PIN is set but LAN_FALLBACK_CIDRS is empty - LAN PIN fallback disabled."
+    )
+if LAN_FALLBACK_NETWORKS and not LAN_FALLBACK_PIN:
+    logger.warning(
+        "LAN_FALLBACK_CIDRS is set but LAN_FALLBACK_PIN is empty - LAN PIN fallback disabled."
+    )
+if LAN_FALLBACK_PIN and len(LAN_FALLBACK_PIN) < 8:
+    logger.warning("LAN_FALLBACK_PIN is shorter than 8 characters - consider a longer PIN.")
+
+
+def _lan_pin_fallback_active() -> bool:
+    return bool(LAN_FALLBACK_PIN and LAN_FALLBACK_NETWORKS)
+
+
+def _client_in_lan(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in LAN_FALLBACK_NETWORKS)
+
+
+def _is_https_request(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    return forwarded_proto.split(",")[0].strip().lower() == "https"
+
 
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_S = 300
@@ -356,11 +399,23 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
 
     if TOTP_SECRET:
-        if not body.totp_code:
-            raise HTTPException(status_code=400, detail="2FA code required.")
-        if not pyotp.TOTP(TOTP_SECRET).verify(body.totp_code.strip(), valid_window=1):
-            _record_failed_attempt(ip)
-            raise HTTPException(status_code=401, detail="Invalid 2FA code.")
+        code = (body.totp_code or "").strip()
+        lan_pin_ok = (
+            _lan_pin_fallback_active()
+            and _client_in_lan(ip)
+            and code
+            and secrets.compare_digest(code.encode(), LAN_FALLBACK_PIN.encode())
+        )
+        if lan_pin_ok:
+            logger.warning(
+                "LAN PIN fallback used for user '%s' from %s", body.username, ip
+            )
+        else:
+            if not code:
+                raise HTTPException(status_code=400, detail="2FA code required.")
+            if not pyotp.TOTP(TOTP_SECRET).verify(code, valid_window=1):
+                _record_failed_attempt(ip)
+                raise HTTPException(status_code=401, detail="Invalid 2FA code.")
 
     response = JSONResponse({"status": "ok"})
     response.set_cookie(
@@ -369,7 +424,7 @@ async def login(body: LoginRequest, request: Request):
         max_age=SESSION_TTL_S,
         httponly=True,
         samesite="lax",
-        secure=COOKIE_SECURE,
+        secure=COOKIE_SECURE and _is_https_request(request),
         path="/",
     )
     return response

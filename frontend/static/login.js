@@ -15,15 +15,6 @@ function showError(msg) {
     if (!res.ok) return;
     const cfg = await res.json();
 
-    if (cfg.cookie_secure && window.location.protocol !== 'https:') {
-      showError(
-        'Warning: the server requires secure cookies (COOKIE_SECURE=true), ' +
-        'but this page is loaded over plain HTTP. Login will fail silently. ' +
-        'Either access it over HTTPS, or set COOKIE_SECURE=false in .env ' +
-        'and restart the container.'
-      );
-    }
-
     if (!cfg.totp_required) {
       totpField.style.display = 'none';
     } else {
