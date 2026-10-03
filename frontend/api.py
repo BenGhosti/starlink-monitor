@@ -133,7 +133,22 @@ def verify_session_cookie(cookie_value: str | None) -> str | None:
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    # Behind the reverse proxy (private/loopback peer), trust X-Real-IP which
+    # nginx-proxy-manager sets to the real client address. Without this, every
+    # proxied visitor shares one rate-limit bucket and counts as "LAN".
+    if peer_addr.is_private or peer_addr.is_loopback:
+        real = request.headers.get("x-real-ip", "").strip()
+        if real:
+            try:
+                return str(ipaddress.ip_address(real))
+            except ValueError:
+                pass
+    return peer
 
 
 def _rate_limited(ip: str) -> bool:
